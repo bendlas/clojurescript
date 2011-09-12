@@ -14,6 +14,7 @@
   (:require [clojure.string :as str]))
 
 (defprotocol PushbackReader
+  (read-count [reader] "Returns number of characters read so far")
   (read-char [reader] "Returns the next char from the Reader,
 nil if the end of stream has been reached")
   (unread [reader ch] "Push back a single character on to the stream"))
@@ -26,12 +27,23 @@ nil if the end of stream has been reached")
       (read-char [_]
         (let [c (.read rdr)]
           (when-not (neg? c)
+            (swap! cnt inc)
             (char c))))
       (unread [_ ch]
         (when ch
-          (.unread rdr (int ch))))
+          (.unread rdr (int ch))
+          (swap! cnt dec)))
+      (read-count [_] @cnt)
       java.io.Closeable
       (close [_] (.close rdr)))))
+
+(defmacro with-count [rdr & body]
+  `(let [start# (dec (read-count ~rdr))
+         form# (do ~@body)
+         end# (read-count ~rdr)]
+     (if (instance? clojure.lang.IObj form#)
+       (vary-meta form# assoc ::start start# ::end end#)
+       form#)))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; predicates
@@ -248,12 +260,11 @@ nil if the end of stream has been reached")
 
 (defn read-symbol
   [reader initch]
-  (let [token (read-token reader initch)
-        sym (if (pos? (.indexOf token (int \/)))
-              (symbol (subs token 0 (.indexOf token (int \/)))
-                      (subs token (inc (.indexOf token (int \/))) (.length token)))
-              (get special-symbols token (symbol token)))]
-    sym))
+  (let [token (read-token reader initch)]
+    (if (pos? (.indexOf token (int \/)))
+      (symbol (subs token 0 (.indexOf token (int \/)))
+              (subs token (inc (.indexOf token (int \/))) (.length token)))
+      (get special-symbols token (symbol token)))))
 
 (defn read-keyword
   [reader initch]
@@ -286,9 +297,11 @@ nil if the end of stream has been reached")
   (let [m (desugar-meta (read rdr true nil true))]
     (when-not (map? m)
       (reader-error rdr "Metadata must be Symbol,Keyword,String or Map"))
-    (let [o (read rdr true nil true)]
+    (let [start (read-count rdr)
+          o (read rdr true nil true)]
       (if (instance? clojure.lang.IObj o)
-        (with-meta o (merge (meta o) m))
+        (with-meta o
+          (merge {::form-start start} (meta o) m))
         (reader-error rdr "Metadata can only be applied to IObjs")))))
 
 (defn read-set
@@ -297,7 +310,7 @@ nil if the end of stream has been reached")
 
 (defn read-regex
   [rdr ch]
-  (-> (read-string rdr ch) re-pattern))
+  (-> (read-literal-string rdr ch) re-pattern))
 
 (defn read-discard
   [rdr _]
@@ -344,13 +357,14 @@ nil if the end of stream has been reached")
      (whitespace? ch) (recur reader eof-is-error sentinel is-recursive)
      (comment-prefix? ch) (recur (read-comment reader ch) eof-is-error sentinel is-recursive)
      :else (let [res
-                 (cond
-                  (macros ch) ((macros ch) reader ch)
-                  (number-literal? reader ch) (read-number reader ch)
-                  :else (read-symbol reader ch))]
-     (if (= res reader)
-       (recur reader eof-is-error sentinel is-recursive)
-       res)))))
+                 (with-count reader
+                   (cond
+                    (macros ch) ((macros ch) reader ch)
+                    (number-literal? reader ch) (read-number reader ch)
+                    :else (read-symbol reader ch)))]
+             (if (= res reader)
+               (recur reader eof-is-error sentinel is-recursive)
+               res)))))
 
 (defn read-string
   "Reads one object from the string s"
