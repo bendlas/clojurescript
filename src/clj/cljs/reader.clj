@@ -6,30 +6,32 @@
 ;   the terms of this license.
 ;   You must not remove this notice, or any other, from this software.
 
+;; ### Port of the cljs reader to clj
+;; by bendlas
+
 (ns cljs.reader
-  (:require [goog.string :as gstring]))
+  (:refer-clojure :exclude [read read-string])
+  (:require [clojure.string :as str]))
 
 (defprotocol PushbackReader
   (read-char [reader] "Returns the next char from the Reader,
 nil if the end of stream has been reached")
   (unread [reader ch] "Push back a single character on to the stream"))
 
-; Using two atoms is less idomatic, but saves the repeat overhead of map creation
-(deftype StringPushbackReader [s index-atom buffer-atom]
-  PushbackReader
-  (read-char [reader]
-             (if (empty? @buffer-atom)
-               (let [idx @index-atom]
-                 (swap! index-atom inc)
-                 (nth s idx))
-               (let [buf @buffer-atom]
-                 (swap! buffer-atom rest)
-                 (first buf))))
-  (unread [reader ch] (swap! buffer-atom #(cons ch %))))
-
-(defn push-back-reader [s]
-  "Creates a StringPushbackReader from a given string"
-  (StringPushbackReader. s (atom 0) (atom nil)))
+(defn push-back-reader [rdr]
+  (let [rdr (java.io.PushbackReader. rdr)
+        cnt (atom 0)]
+    (reify
+      PushbackReader
+      (read-char [_]
+        (let [c (.read rdr)]
+          (when-not (neg? c)
+            (char c))))
+      (unread [_ ch]
+        (when ch
+          (.unread rdr (int ch))))
+      java.io.Closeable
+      (close [_] (.close rdr)))))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; predicates
@@ -38,12 +40,12 @@ nil if the end of stream has been reached")
 (defn- whitespace?
   "Checks whether a given character is whitespace"
   [ch]
-  (or (gstring/isBreakingWhitespace ch) (= \, ch)))
+  (or (Character/isWhitespace ch) (= \, ch)))
 
 (defn- numeric?
   "Checks whether a given character is numeric"
   [ch]
-  (gstring/isNumeric ch))
+  (Character/isDigit ch))
 
 (defn- comment-prefix?
   "Checks whether the character begins a comment."
@@ -68,14 +70,15 @@ nil if the end of stream has been reached")
 ; later will do e.g. line numbers...
 (defn reader-error
   [rdr & msg]
-  (throw (apply str msg)))
+  (throw (RuntimeException. (apply str msg))))
 
 (defn macro-terminating? [ch]
   (and (not= ch \#) (not= ch \') (contains? macros ch)))
 
 (defn read-token
   [rdr initch]
-  (loop [sb (gstring/StringBuffer. initch)
+  (loop [sb (doto (StringBuilder.)
+              (.append initch))
          ch (read-char rdr)]
     (if (or (nil? ch)
             (whitespace? ch)
@@ -106,11 +109,11 @@ nil if the end of stream has been reached")
                        (nth groups 3) [(nth groups 3) 10]
                        (nth groups 4) [(nth groups 4) 16]
                        (nth groups 5) [(nth groups 5) 8]
-                       (nth groups 7) [(nth groups 7) (js/parseInt (nth groups 7))] 
+                       (nth groups 7) [(nth groups 7) (Integer/parseInt (nth groups 7))] 
                        :default [nil nil])]
         (if (nil? n)
           nil
-          (* negate (js/parseInt n radix)))))))
+          (* negate (Integer/parseInt n radix)))))))
 
 
 (defn- match-ratio
@@ -118,11 +121,11 @@ nil if the end of stream has been reached")
   (let [groups (re-find ratio-pattern s)
         numinator (nth groups 1)
         denominator (nth groups 2)]
-    (/ (js/parseInt numinator) (js/parseInt denominator))))
+    (/ (Integer/parseInt numinator) (Integer/parseInt denominator))))
 
 (defn- match-float
   [s]
-  (js/parseFloat s))
+  (Float/parseFloat s))
 
 (defn- match-number
   [s]
@@ -216,7 +219,8 @@ nil if the end of stream has been reached")
 
 (defn read-number
   [reader initch]
-  (loop [buffer (gstring/StringBuffer. initch)
+  (loop [buffer (doto (StringBuilder.)
+                  (.append initch))
          ch (read-char reader)]
     (if (or (nil? ch) (whitespace? ch) (contains? macros ch))
       (do
@@ -226,9 +230,9 @@ nil if the end of stream has been reached")
               (reader-error reader "Invalid number format [" s "]"))))
       (recur (do (.append buffer ch) buffer) (read-char reader)))))
 
-(defn read-string
+(defn read-literal-string
   [reader _]
-  (loop [buffer (gstring/StringBuffer.)
+  (loop [buffer (StringBuilder.)
          ch (read-char reader)]
     (cond
      (nil? ch) (reader-error reader "EOF while reading string")
@@ -244,18 +248,19 @@ nil if the end of stream has been reached")
 
 (defn read-symbol
   [reader initch]
-  (let [token (read-token reader initch)]
-    (if (gstring/contains token \/)
-      (symbol (subs token 0 (.indexOf token \/))
-              (subs (inc (.indexOf token \/)) (.length token)))
-      (get special-symbols token (symbol token)))))
+  (let [token (read-token reader initch)
+        sym (if (pos? (.indexOf token (int \/)))
+              (symbol (subs token 0 (.indexOf token (int \/)))
+                      (subs token (inc (.indexOf token (int \/))) (.length token)))
+              (get special-symbols token (symbol token)))]
+    sym))
 
 (defn read-keyword
   [reader initch]
   (let [token (read-token reader (read-char reader))]
-    (if (gstring/contains token \/)
-      (keyword (subs token 0 (.indexOf token \/))
-               (subs token (inc (.indexOf token \/)) (.length token)))
+    (if (pos? (.indexOf token (int \/)))
+      (keyword (subs token 0 (.indexOf token (int \/)))
+               (subs token (inc (.indexOf token (int \/))) (.length token)))
       (keyword token))))
 
 (defn desugar-meta
@@ -282,9 +287,9 @@ nil if the end of stream has been reached")
     (when-not (map? m)
       (reader-error rdr "Metadata must be Symbol,Keyword,String or Map"))
     (let [o (read rdr true nil true)]
-      (if (satisfies? IWithMeta o)
+      (if (instance? clojure.lang.IObj o)
         (with-meta o (merge (meta o) m))
-        (reader-error rdr "Metadata can only be applied to IWithMetas")))))
+        (reader-error rdr "Metadata can only be applied to IObjs")))))
 
 (defn read-set
   [rdr _]
@@ -300,7 +305,7 @@ nil if the end of stream has been reached")
   rdr)
 
 (def macros
-     { \" read-string
+     { \" read-literal-string
        \: read-keyword
        \; not-implemented ;; never hit this
        \' (wrapping-reader 'quote)
@@ -325,7 +330,9 @@ nil if the end of stream has been reached")
    \< (throwing-reader "Unreadable form")
    \" read-regex
    \! read-comment
-   \_ read-discard})
+   \_ read-discard
+   \^ read-meta
+   \( not-implemented})
 
 (defn read
   "Reads the first object from a PushbackReader. Returns the object read.
@@ -348,7 +355,5 @@ nil if the end of stream has been reached")
 (defn read-string
   "Reads one object from the string s"
   [s]
-  (let [r (push-back-reader s)]
+  (with-open [r (push-back-reader (java.io.StringReader. s))]
     (read r true nil false)))
-
-  
