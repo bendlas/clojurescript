@@ -71,7 +71,7 @@ nil if the end of stream has been reached")
   (throw (apply str msg)))
 
 (defn macro-terminating? [ch]
-  (and (not= ch "#") (not= ch \') (contains? macros ch)))
+  (and (not= ch \#) (not= ch \') (contains? macros ch)))
 
 (defn read-token
   [rdr initch]
@@ -101,7 +101,7 @@ nil if the end of stream has been reached")
   (let [groups (re-find int-pattern s)]
     (if (nth groups 2)
       0
-      (let [negate (if (= "-" (nth groups 1)) -1 1) 
+      (let [negate (if (= \- (nth groups 1)) -1 1) 
             [n radix] (cond
                        (nth groups 3) [(nth groups 3) 10]
                        (nth groups 4) [(nth groups 4) 16]
@@ -131,13 +131,13 @@ nil if the end of stream has been reached")
    (re-matches ratio-pattern s) (match-ratio s)
    (re-matches float-pattern s) (match-float s)))
 
-(def escape-char-map {\t "\t"
-                      \r "\r"
-                      \n "\n"
+(def escape-char-map {\t \tab
+                      \r \return
+                      \n \newline
                       \\ \\
                       \" \"
-                      \b "\b"
-                      \f "\f"})
+                      \b \backspace
+                      \f \formfeed})
 
 (defn read-unicode-char
   [reader initch]
@@ -199,17 +199,17 @@ nil if the end of stream has been reached")
 
 (defn read-list
   [rdr _]
-  (apply list (read-delimited-list ")" rdr true)))
+  (apply list (read-delimited-list \) rdr true)))
 
 (def read-comment skip-line)
 
 (defn read-vector
   [rdr _]
-  (read-delimited-list "]" rdr true))
+  (read-delimited-list \] rdr true))
 
 (defn read-map
   [rdr _]
-  (let [l (read-delimited-list "}" rdr true)]
+  (let [l (read-delimited-list \} rdr true)]
     (when (odd? (count l))
       (reader-error rdr "Map literal must contain an even number of forms"))
     (apply hash-map l)))
@@ -232,7 +232,7 @@ nil if the end of stream has been reached")
          ch (read-char reader)]
     (cond
      (nil? ch) (reader-error reader "EOF while reading string")
-     (= "\\" ch) (recur (do (.append buffer (escape-char buffer reader)) buffer)
+     (= \\ ch) (recur (do (.append buffer (escape-char buffer reader)) buffer)
                         (read-char reader))
      (= \" ch) (. buffer (toString))
      :default (recur (do (.append buffer ch) buffer) (read-char reader)))))
@@ -245,17 +245,17 @@ nil if the end of stream has been reached")
 (defn read-symbol
   [reader initch]
   (let [token (read-token reader initch)]
-    (if (gstring/contains token "/")
-      (symbol (subs token 0 (.indexOf token "/"))
-              (subs (inc (.indexOf token "/")) (.length token)))
+    (if (gstring/contains token \/)
+      (symbol (subs token 0 (.indexOf token \/))
+              (subs (inc (.indexOf token \/)) (.length token)))
       (get special-symbols token (symbol token)))))
 
 (defn read-keyword
   [reader initch]
   (let [token (read-token reader (read-char reader))]
-    (if (gstring/contains token "/")
-      (keyword (subs token 0 (.indexOf token "/"))
-               (subs token (inc (.indexOf token "/")) (.length token)))
+    (if (gstring/contains token \/)
+      (keyword (subs token 0 (.indexOf token \/))
+               (subs token (inc (.indexOf token \/)) (.length token)))
       (keyword token))))
 
 (defn desugar-meta
@@ -288,7 +288,7 @@ nil if the end of stream has been reached")
 
 (defn read-set
   [rdr _]
-  (set (read-delimited-list "}" rdr true)))
+  (set (read-delimited-list \} rdr true)))
 
 (defn read-regex
   [rdr ch]
@@ -321,11 +321,11 @@ nil if the end of stream has been reached")
 
 ;; omitted by design: var reader, eval reader
 (def dispatch-macros
-  {"{" read-set
-   "<" (throwing-reader "Unreadable form")
-   "\"" read-regex
-   "!" read-comment
-   "_" read-discard})
+  {\{ read-set
+   \< (throwing-reader "Unreadable form")
+   \" read-regex
+   \! read-comment
+   \_ read-discard})
 
 (defn read
   "Reads the first object from a PushbackReader. Returns the object read.
