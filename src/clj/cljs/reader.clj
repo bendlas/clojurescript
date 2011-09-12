@@ -310,7 +310,16 @@ nil if the end of stream has been reached")
 
 (defn read-regex
   [rdr ch]
-  (-> (read-literal-string rdr ch) re-pattern))
+  (loop [buffer (StringBuilder.)
+         ch (read-char rdr)]
+    (cond
+     (nil? ch) (reader-error rdr "EOF while reading string")
+     (= \\ ch) (do (.append buffer ch)
+                   (.append buffer (or (read-char rdr)
+                                       (reader-error rdr "EOF while reading string")))
+                   (recur buffer (read-char rdr)))
+     (= \" ch) (re-pattern (.toString buffer))
+     :default (recur (do (.append buffer ch) buffer) (read-char rdr)))))
 
 (defn read-discard
   [rdr _]
