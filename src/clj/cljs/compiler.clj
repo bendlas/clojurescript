@@ -9,59 +9,18 @@
 (set! *warn-on-reflection* true)
 
 (ns cljs.compiler
-  (:refer-clojure :exclude [munge load-file loaded-libs macroexpand-1])
+  (:refer-clojure :exclude [load-file loaded-libs macroexpand-1])
   (:require [clojure.java.io :as io]
             [clojure.string :as string]))
 
 (declare resolve-var)
-(require 'cljs.core)
 
-(def js-reserved
-  #{"abstract" "boolean" "break" "byte" "case"
-    "catch" "char" "class" "const" "continue"
-    "debugger" "default" "delete" "do" "double"
-    "else" "enum" "export" "extends" "final"
-    "finally" "float" "for" "function" "goto" "if"
-    "implements" "import" "in" "instanceof" "int"
-    "interface" "let" "long" "native" "new"
-    "package" "private" "protected" "public"
-    "return" "short" "static" "super" "switch"
-    "synchronized" "this" "throw" "throws"
-    "transient" "try" "typeof" "var" "void"
-    "volatile" "while" "with" "yield" "methods"})
+(defonce namespaces (atom '{clojure.core {:name clojure.core.core}
+                            user {:name user}}))
 
-(defonce namespaces (atom '{cljs.core {:name cljs.core}
-                            cljs.user {:name cljs.user}}))
-
-(def ^:dynamic *cljs-ns* 'cljs.user)
+(def ^:dynamic *cljs-ns* 'user)
 (def ^:dynamic *cljs-verbose* false)
 (def ^:dynamic *cljs-warn-on-undeclared* false)
-
-(defn munge [s]
-  (let [ss (str s)
-        ms (if (.contains ss "]")
-             (let [idx (inc (.lastIndexOf ss "]"))]
-               (str (subs ss 0 idx)
-                    (clojure.lang.Compiler/munge (subs ss idx))))
-             (clojure.lang.Compiler/munge ss))
-        ms (if (js-reserved ms) (str ms "$") ms)]
-    (if (symbol? s)
-      (symbol ms)
-      ms)))
-
-;;todo - move to core.cljs, using js
-(def ^String bootjs "
-//goog.provide should do this for us
-//cljs = {}
-//cljs.lang = {}
-//cljs.user = {}
-//goog.provide('cljs.core');
-//goog.provide('cljs.user');
-//cljs.lang.truth_ = function(x){return x != null && x !== false;}
-//cljs.lang.fnOf_ = function(f){return (f instanceof Function?f:f.cljs$core$Fn$invoke);}
-//cljs.lang.original_goog_require = goog.require;
-goog.require = function(rule){Packages.clojure.lang.RT[\"var\"](\"cljs.compiler\",\"goog-require\").invoke(goog.global.cljs_javascript_engine, rule);}
-")
 
 (defn confirm-var-exists [env prefix suffix]
   (when true ;;*cljs-warn-on-undeclared*
@@ -81,491 +40,70 @@ goog.require = function(rule){Packages.clojure.lang.RT[\"var\"](\"cljs.compiler\
 (defn core-name?
   "Is sym visible from core in the current compilation namespace?"
   [env sym]
-  (and (get (:defs (@namespaces 'cljs.core)) sym)
+  (and (get (:defs (@namespaces 'clojure.core)) sym)
        (not (contains? (-> env :ns :excludes) sym))))
 
-(defn js-var [sym]
-  (let [parts (string/split (name sym) #"\.")
-        first (first parts)
-        step (fn [part] (str "['" part "']"))]
-    (apply str first (map step (rest parts)))))
-
 (defn resolve-existing-var [env sym]
-  (if (= (namespace sym) "js")
-    {:name (js-var sym)}
-    (let [s (str sym)
-          lb (-> env :locals sym)
-          nm
-          (cond
-           lb (:name lb)
+  (let [s (str sym)
+        lb (-> env :locals sym)
+        nm
+        (cond
+         lb (:name lb)
 
-           (namespace sym)
-           (let [ns (namespace sym)
-                 ns (if (= "clojure.core" ns) "cljs.core" ns)
-                 full-ns (resolve-ns-alias env ns)]
-             (confirm-var-exists env full-ns (symbol (name sym)))
-             (symbol (str full-ns "." (munge (name sym)))))
+         (namespace sym)
+         (let [ns (namespace sym)
+               full-ns (resolve-ns-alias env ns)]
+           (confirm-var-exists env full-ns (symbol (name sym)))
+           (symbol (str full-ns "." (munge (name sym)))))
 
-           (.contains s ".")
-           (munge (let [idx (.indexOf s ".")
-                        prefix (symbol (subs s 0 idx))
-                        suffix (subs s idx)
-                        lb (-> env :locals prefix)]
-                    (if lb
-                      (symbol (str (:name lb) suffix))
-                      (do
-                        (confirm-var-exists env prefix (symbol suffix))
-                        sym))))
+         (.contains s ".")
+         (munge (let [idx (.indexOf s ".")
+                      prefix (symbol (subs s 0 idx))
+                      suffix (subs s idx)
+                      lb (-> env :locals prefix)]
+                  (if lb
+                    (symbol (str (:name lb) suffix))
+                    (do
+                      (confirm-var-exists env prefix (symbol suffix))
+                      sym))))
 
-           :else
-           (let [full-ns (if (core-name? env sym)
-                           'cljs.core
-                           (-> env :ns :name))]
-             (confirm-var-exists env full-ns sym)
-             (munge (symbol (str full-ns "." (munge (name sym)))))))]
-      {:name nm})))
+         :else
+         (let [full-ns (-> env :ns :name)]
+           (confirm-var-exists env full-ns sym)
+           (munge (symbol (str full-ns "." (munge (name sym)))))))]
+    {:name nm}))
 
 (defn resolve-var [env sym]
-  (if (= (namespace sym) "js")
-    {:name (js-var sym)}
-    (let [s (str sym)
-          lb (-> env :locals sym)
-          nm 
-          (cond
-           lb (:name lb)
+  (let [s (str sym)
+        lb (-> env :locals sym)
+        nm 
+        (cond
+         lb (:name lb)
          
-           (namespace sym)
-           (let [ns (namespace sym)
-                 ns (if (= "clojure.core" ns) "cljs.core" ns)]
-             (symbol (str (resolve-ns-alias env ns) "." (munge (name sym)))))
+         (namespace sym)
+         (let [ns (namespace sym)]
+           (symbol (str (resolve-ns-alias env ns) "." (munge (name sym)))))
 
-           (.contains s ".")
-           (munge (let [idx (.indexOf s ".")
-                        prefix (symbol (subs s 0 idx))
-                        suffix (subs s idx)
-                        lb (-> env :locals prefix)]
-                    (if lb
-                      (symbol (str (:name lb) suffix))
-                      sym)))
+         (.contains s ".")
+         (munge (let [idx (.indexOf s ".")
+                      prefix (symbol (subs s 0 idx))
+                      suffix (subs s idx)
+                      lb (-> env :locals prefix)]
+                  (if lb
+                    (symbol (str (:name lb) suffix))
+                    sym)))
 
-           :else
-           (munge (symbol (str
-                           (if (core-name? env sym)
-                             'cljs.core
-                             (-> env :ns :name))
-                           "." (munge (name sym))))))]
-      {:name nm})))
+         :else
+         (munge (symbol (str (-> env :ns :name)
+                             "." (munge (name sym))))))]
+    {:name nm}))
 
 (defn- comma-sep [xs]
   (apply str (interpose "," xs)))
 
-(defmulti emit-constant class)
-(defmethod emit-constant nil [x] (print "null"))
-(defmethod emit-constant Long [x] (print x))
-(defmethod emit-constant Integer [x] (print x)) ; reader puts Integers in metadata
-(defmethod emit-constant Double [x] (print x))
-(defmethod emit-constant String [x] (pr x))
-(defmethod emit-constant Boolean [x] (print (if x "true" "false")))
-(defmethod emit-constant Character [x] (pr (str x)))
-
-(defmethod emit-constant java.util.regex.Pattern [x]
-  (let [[_ flags pattern] (re-find #"^(?:\(\?([idmsux]*)\))?(.*)" (str x))]
-    (print (str \/ (.replaceAll (re-matcher #"/" pattern) "\\\\/") \/ flags))))
-
-(defmethod emit-constant clojure.lang.Keyword [x]
-           (pr (str \uFDD0 \'
-                    (if (namespace x)
-                      (str (namespace x) "/") "")
-                    (name x))))
-
-(defmethod emit-constant clojure.lang.Symbol [x]
-           (pr (str \uFDD1 \'
-                    (if (namespace x)
-                      (str (namespace x) "/") "")
-                    (name x))))
-
-(defn- emit-meta-constant [x string]
-  (if (meta x)
-    (do
-      (print (str "cljs.core.with_meta(" string ","))
-      (emit-constant (meta x))
-      (print ")"))
-    (print string)))
-
-(defmethod emit-constant clojure.lang.PersistentList$EmptyList [x]
-  (emit-meta-constant x "cljs.core.List.EMPTY"))
-
-(defmethod emit-constant clojure.lang.PersistentList [x]
-  (emit-meta-constant x
-    (str "cljs.core.list("
-         (comma-sep (map #(with-out-str (emit-constant %)) x))
-         ")")))
-
-(defmethod emit-constant clojure.lang.Cons [x]
-  (emit-meta-constant x
-    (str "cljs.core.list("
-         (comma-sep (map #(with-out-str (emit-constant %)) x))
-         ")")))
-
-(defmethod emit-constant clojure.lang.IPersistentVector [x]
-  (emit-meta-constant x
-    (str "(new cljs.core.Vector(null, ["
-         (comma-sep (map #(with-out-str (emit-constant %)) x))
-         "]))")))
-
-(defmethod emit-constant clojure.lang.IPersistentMap [x]
-  (emit-meta-constant x
-    (str "cljs.core.hash_map("
-         (comma-sep (map #(with-out-str (emit-constant %))
-                         (apply concat x)))
-         ")")))
-
-(defmethod emit-constant clojure.lang.PersistentHashSet [x]
-  (emit-meta-constant x
-    (str "cljs.core.set(["
-         (comma-sep (map #(with-out-str (emit-constant %)) x))
-         "])")))
-
-(defmulti emit :op)
-
-(defn ^String emits [expr]
-  (with-out-str (emit expr)))
-
-(defn emit-block
-  [context statements ret]
-  (if statements
-    (let [body (str (apply str (map emits statements)) (emits ret))]
-      (print body))
-    (emit ret)))
-
-(defmacro emit-wrap [env & body]
-  `(let [env# ~env]
-     (when (= :return (:context env#)) (print "return "))
-     ~@body
-     (when-not (= :expr (:context env#)) (print ";\n"))))
-
-(defmethod emit :var
-  [{:keys [info env] :as arg}]
-  (emit-wrap env (print (munge (:name info)))))
-
-(defmethod emit :meta
-  [{:keys [expr meta env]}]
-  (emit-wrap env
-    (print (str "cljs.core.with_meta(" (emits expr) "," (emits meta) ")"))))
-
-(defmethod emit :map
-  [{:keys [children env simple-keys? keys vals]}]
-  (emit-wrap env
-    (if simple-keys?
-      (print (str "cljs.core.ObjMap.fromObject(["
-                  (comma-sep (map emits keys)) ; keys
-                  "],{"
-                  (comma-sep (map (fn [k v] (str (emits k) ":" (emits v)))
-                                  keys vals)) ; js obj
-                  "})"))
-      (print (str "cljs.core.HashMap.fromArrays(["
-                  (comma-sep (map emits keys))
-                  "],["
-                  (comma-sep (map emits vals))
-                  "])")))))
-
-(defmethod emit :vector
-  [{:keys [children env]}]
-  (emit-wrap env
-    (print (str "cljs.core.Vector.fromArray(["
-                (comma-sep (map emits children)) "])"))))
-
-(defmethod emit :set
-  [{:keys [children env]}]
-  (emit-wrap env
-    (print (str "cljs.core.set(["
-                (comma-sep (map emits children)) "])"))))
-
-(defmethod emit :constant
-  [{:keys [form env]}]
-  (when-not (= :statement (:context env))
-    (emit-wrap env (emit-constant form))))
-
-(defmethod emit :if
-  [{:keys [test then else env]}]
-  (let [context (:context env)]
-    (if (= :expr context)
-      (print (str "(cljs.core.truth_(" (emits test) ")?" (emits then) ":" (emits else) ")"))
-      (print (str "if(cljs.core.truth_(" (emits test) "))\n{" (emits then) "} else\n{" (emits else) "}\n")))))
-
-(defmethod emit :throw
-  [{:keys [throw env]}]
-  (if (= :expr (:context env))
-    (print (str "(function(){throw " (emits throw) "})()"))
-    (print (str "throw " (emits throw) ";\n"))))
-
-(defn emit-comment
-  "Emit a nicely formatted comment string."
-  [doc jsdoc]
-  (let [docs (when doc [doc])
-        docs (if jsdoc (concat docs jsdoc) docs)
-        docs (remove nil? docs)]
-    (letfn [(print-comment-lines [e] (doseq [next-line (string/split-lines e)]
-                                       (println "*" (string/trim next-line))))]
-      (when (seq docs)
-        (println "/**")
-        (doseq [e docs]
-          (when e
-            (print-comment-lines e)))
-        (println "*/")))))
-
-(defmethod emit :def
-  [{:keys [name init env doc export]}]
-  (when init
-    (emit-comment doc (:jsdoc init))
-    (print name)
-    (print (str " = " (emits init)))
-    (when-not (= :expr (:context env)) (print ";\n"))
-    (when export
-      (println (str "goog.exportSymbol('" export "', " name ");")))))
-
-(defn emit-apply-to
-  [{:keys [name params env]}]
-  (let [arglist (gensym "arglist__")
-        delegate-name (str name "__delegate")]
-    (println (str "(function (" arglist "){"))
-    (doseq [[i param] (map-indexed vector (butlast params))]
-      (print (str "var " param " = cljs.core.first("))
-      (dotimes [_ i] (print "cljs.core.next("))
-      (print (str arglist ")"))
-      (dotimes [_ i] (print ")"))
-      (println ";"))
-    (if (< 1 (count params))
-      (do
-        (print (str "var " (last params) " = cljs.core.rest("))
-        (dotimes [_ (- (count params) 2)] (print "cljs.core.next("))
-        (print arglist)
-        (dotimes [_ (- (count params) 2)] (print ")"))
-        (println ");")
-        (println (str "return " delegate-name ".call(" (string/join ", " (cons "this" params)) ");")))
-      (do
-        (print (str "var " (last params) " = "))
-        (print "cljs.core.seq(" arglist ");")
-        (println ";")
-        (println (str "return " delegate-name ".call(" (string/join ", " (cons "this" params)) ");"))))
-    (print "})")))
-
-(defn emit-fn-method
-  [{:keys [gthis name variadic params statements ret env recurs max-fixed-arity]}]
-  (emit-wrap env
-             (print (str "(function " name "(" (comma-sep params) "){\n"))
-             (when gthis
-               (println (str "var " gthis " = this;")))
-             (when recurs (print "while(true){\n"))
-             (emit-block :return statements ret)
-             (when recurs (print "break;\n}\n"))
-             (print "})")))
-
-(defn emit-variadic-fn-method
-  [{:keys [gthis name variadic params statements ret env recurs max-fixed-arity] :as f}]
-  (emit-wrap env
-             (let [name (or name (gensym))
-                   delegate-name (str name "__delegate")]
-               (println "(function() { ")
-               (println (str "var " delegate-name " = function (" (comma-sep params) "){"))
-               (when recurs (print "while(true){\n"))
-               (emit-block :return statements ret)
-               (when recurs (print "break;\n}\n"))
-               (println "};")
-
-               (print (str "var " name " = function (" (comma-sep
-                                                        (if variadic
-                                                          (concat (butlast params) ['var_args])
-                                                          params)) "){\n"))
-               (when gthis
-                 (println (str "var " gthis " = this;")))
-               (when variadic
-                 (println (str "var " (last params) " = null;"))
-                 (println (str "if (goog.isDef(var_args)) {"))
-                 (println (str "  " (last params) " = cljs.core.array_seq(Array.prototype.slice.call(arguments, " (dec (count params)) "),0);"))
-                 (println (str "} ")))
-               (println (str "return " delegate-name ".call(" (string/join ", " (cons "this" params)) ");"))
-               (println "};")
-
-               (println (str name ".cljs$lang$maxFixedArity = " max-fixed-arity ";"))
-               (println (str name ".cljs$lang$applyTo = "
-                             (with-out-str
-                               (emit-apply-to (assoc f :name name)))
-                             ";"))
-               (println (str "return " name ";"))
-               (println "})()"))))
-
-(defmethod emit :fn
-  [{:keys [name env methods max-fixed-arity variadic recur-frames]}]
-  ;;fn statements get erased, serve no purpose and can pollute scope if named
-  (when-not (= :statement (:context env))
-    (let [loop-locals (seq (mapcat :names (filter #(and % @(:flag %)) recur-frames)))]
-      (when loop-locals
-        (when (= :return (:context env))
-            (print "return "))
-        (println (str "((function (" (comma-sep loop-locals) "){"))
-        (when-not (= :return (:context env))
-            (print "return ")))
-      (if (= 1 (count methods))
-        (if variadic
-          (emit-variadic-fn-method (assoc (first methods) :name name))
-          (emit-fn-method (assoc (first methods) :name name)))
-        (let [name (or name (gensym))
-              maxparams (apply max-key count (map :params methods))
-              mmap (zipmap (repeatedly #(gensym (str name  "__"))) methods)
-              ms (sort-by #(-> % second :params count) (seq mmap))]
-          (when (= :return (:context env))
-            (print "return "))
-          (println "(function() {")
-          (println (str "var " name " = null;"))
-          (doseq [[n meth] ms]
-            (println (str "var " n " = " (with-out-str (if (:variadic meth)
-                                                         (emit-variadic-fn-method meth)
-                                                         (emit-fn-method meth))) ";")))
-          (println (str name " = function(" (comma-sep (if variadic
-                                                         (concat (butlast maxparams) ['var_args])
-                                                         maxparams)) "){"))
-          (when variadic
-            (println (str "var " (last maxparams) " = var_args;")))
-          (println "switch(arguments.length){")
-          (doseq [[n meth] ms]
-            (if (:variadic meth)
-              (do (println "default:")
-                  (println (str "return " n ".apply(this,arguments);")))
-              (let [pcnt (count (:params meth))]
-                (println "case " pcnt ":")
-                (println (str "return " n ".call(this" (if (zero? pcnt) nil
-                                                           (str "," (comma-sep (take pcnt maxparams)))) ");")))))
-          (println "}")
-          (println "throw('Invalid arity: ' + arguments.length);")
-          (println "};")
-          (when variadic
-            (println (str name ".cljs$lang$maxFixedArity = " max-fixed-arity ";"))
-            (println (str name ".cljs$lang$applyTo = " (some #(let [[n m] %] (when (:variadic m) n)) ms) ".cljs$lang$applyTo;")))
-          (println (str "return " name ";"))
-          (println "})()")))
-      (when loop-locals
-        (println (str ";})(" (comma-sep loop-locals) "))"))))))
-
-(defmethod emit :do
-  [{:keys [statements ret env]}]
-  (let [context (:context env)]
-    (when (and statements (= :expr context)) (print "(function (){"))
-    ;(when statements (print "{\n"))
-    (emit-block context statements ret)
-    ;(when statements (print "}"))
-    (when (and statements (= :expr context)) (print "})()"))))
-
-(defmethod emit :try*
-  [{:keys [env try catch name finally]}]
-  (let [context (:context env)
-        subcontext (if (= :expr context) :return context)]
-    (if (or name finally)
-      (do
-        (when (= :expr context) (print "(function (){"))
-        (print "try{")
-        (let [{:keys [statements ret]} try]
-          (emit-block subcontext statements ret))
-        (print "}")
-        (when name
-          (print (str "catch (" name "){"))
-          (when catch
-            (let [{:keys [statements ret]} catch]
-              (emit-block subcontext statements ret)))      
-          (print "}"))
-        (when finally
-          (let [{:keys [statements ret]} finally]
-            (assert (not= :constant (:op ret)) "finally block cannot contain constant")
-            (print "finally {")
-            (emit-block subcontext statements ret)
-            (print "}")))
-        (when (= :expr context) (print "})()")))
-      (let [{:keys [statements ret]} try]
-        (when (and statements (= :expr context)) (print "(function (){"))
-        (emit-block subcontext statements ret)
-        (when (and statements (= :expr context)) (print "})()"))))))
-
-(defmethod emit :let
-  [{:keys [bindings statements ret env loop]}]
-  (let [context (:context env)
-        bs (map (fn [{:keys [name init]}]
-                  (str "var " name " = " (emits init) ";\n"))
-                bindings)]
-    (when (= :expr context) (print "(function (){"))
-    (print (str (apply str bs) "\n"))
-    (when loop (print "while(true){\n"))
-    (emit-block (if (= :expr context) :return context) statements ret)
-    (when loop (print "break;\n}\n"))
-    ;(print "}")
-    (when (= :expr context) (print "})()"))))
-
-(defmethod emit :recur
-  [{:keys [frame exprs env]}]
-  (let [temps (vec (take (count exprs) (repeatedly gensym)))
-        names (:names frame)]
-    (print "{\n")
-    (dotimes [i (count exprs)]
-      (print (str "var " (temps i) " = " (emits (exprs i)) ";\n")))
-    (dotimes [i (count exprs)]
-      (print (str (names i) " = " (temps i) ";\n")))
-    (print "continue;\n")
-    (print "}\n")))
-
-(defmethod emit :invoke
-  [{:keys [f args env]}]
-  (emit-wrap env
-             (print (str (emits f) ".call("
-                         (comma-sep (cons "null" (map emits args)))
-                         ")"))))
-
-(defmethod emit :new
-  [{:keys [ctor args env]}]
-  (emit-wrap env
-             (print (str "(new " (emits ctor) "("
-                         (comma-sep (map emits args))
-                         "))"))))
-
-(defmethod emit :set!
-  [{:keys [target val env]}]
-  (emit-wrap env (print (str (emits target) " = "(emits val)))))
-
-(defmethod emit :ns
-  [{:keys [name requires requires-macros env]}]
-  (println (str "goog.provide('" (munge name) "');"))
-  (when-not (= name 'cljs.core)
-    (println (str "goog.require('cljs.core');")))
-  (doseq [lib (vals requires)]
-    (println (str "goog.require('" (munge lib) "');"))))
-
-(defmethod emit :deftype*
-  [{:keys [t fields]}]
-  (let [fields (map munge fields)]
-    (println "\n/**\n* @constructor\n*/")
-    (println (str t " = (function (" (comma-sep (map str fields)) "){"))
-    (doseq [fld fields]
-      (println (str "this." fld " = " fld ";")))
-    (println "})")))
-
-(defmethod emit :dot
-  [{:keys [target field method args env]}]
-  (emit-wrap env
-             (if field
-               (print (str (emits target) "." field))
-               (print (str (emits target) "." method "("
-                           (comma-sep (map emits args))
-                           ")")))))
-
-(defmethod emit :js
-  [{:keys [env code segs args]}]
-  (emit-wrap env
-             (if code
-               (print code)
-               (print (apply str (interleave (concat segs (repeat nil))
-                                             (concat (map emits args) [nil])))))))
-
 (declare analyze analyze-symbol analyze-seq)
 
-(def specials '#{if def fn* do let* loop* throw try* recur new set! ns deftype* . js* & quote})
+(def specials '#{if def fn* do let* loop* throw try* recur new set! deftype* . & quote})
 
 (def ^:dynamic *recur-frames* nil)
 
@@ -822,29 +360,6 @@ goog.require = function(rule){Packages.clojure.lang.RT[\"var\"](\"cljs.compiler\
              argexprs (map #(analyze enve %) args)]
          {:env env :op :dot :target targetexpr :method (munge method) :args argexprs :children (into children argexprs)})))))
 
-(defmethod parse 'js*
-  [op env [_ form & args] _]
-  (assert (string? form))
-  (if args
-    (disallowing-recur
-     (let [seg (fn seg [^String s]
-                 (let [idx (.indexOf s "~{")]
-                   (if (= -1 idx)
-                     (list s)
-                     (let [end (.indexOf s "}" idx)]
-                       (cons (subs s 0 idx) (seg (subs s (inc end))))))))
-           enve (assoc env :context :expr)
-           argexprs (vec (map #(analyze enve %) args))]
-       {:env env :op :js :segs (seg form) :args argexprs :children argexprs}))
-    (let [interp (fn interp [^String s]
-                   (let [idx (.indexOf s "~{")]
-                     (if (= -1 idx)
-                       (list s)
-                       (let [end (.indexOf s "}" idx)
-                             inner (:name (resolve-existing-var env (symbol (subs s (+ 2 idx) end))))]
-                         (cons (subs s 0 idx) (cons inner (interp (subs s (inc end)))))))))]
-      {:env env :op :js :code (apply str (interp form))})))
-
 (defn parse-invoke
   [env [f & args]]
   (disallowing-recur
@@ -958,54 +473,6 @@ goog.require = function(rule){Packages.clojure.lang.RT[\"var\"](\"cljs.compiler\
         (set? form) (analyze-set env form name)
         :else {:op :constant :env env :form form}))))
 
-(defn eval1
-  [repl-env env form]
-  (try
-    (let [ast (analyze env form)
-          js (emits ast)
-          jse ^javax.script.ScriptEngine (:jse repl-env)]
-      (try
-        (when *cljs-verbose*
-            (print js))
-        (let [filename (.get jse javax.script.ScriptEngine/FILENAME)
-              linenum (or (:line (meta form)) Integer/MIN_VALUE)
-              ctx (sun.org.mozilla.javascript.internal.Context/enter)]
-          (try
-            (.evaluateString ctx (:global repl-env) js filename linenum nil)
-          (finally
-            (sun.org.mozilla.javascript.internal.Context/exit))))
-        (catch Throwable ex
-          ;;we eat ns errors because we know goog.provide() will throw when reloaded
-          ;;TODO - file bug with google, this is bs error
-          ;;this is what you get when you try to 'teach new developers' via errors (goog/base.js 104)
-          (when-not (and (seq? form) (= 'ns (first form)))
-            (prn "Error evaluating:" form :as js)
-            (.printStackTrace ex)
-            #_(println (str ex))))))
-    (catch Throwable ex
-      (.printStackTrace ex)
-      (println (str ex)))))
-
-(defn load-stream [repl-env stream]
-  (with-open [r (io/reader stream)]
-    (let [env {:ns (@namespaces *cljs-ns*) :context :statement :locals {}}
-          pbr (clojure.lang.LineNumberingPushbackReader. r)
-          eof (Object.)]
-      (loop [r (read pbr false eof false)]
-        (let [env (assoc env :ns (@namespaces *cljs-ns*))]
-          (when-not (identical? eof r)
-            (eval1 repl-env env r)
-            (recur (read pbr false eof false))))))))
-
-(defn load-file
-  [repl-env f]
-  (binding [*cljs-ns* 'cljs.user]
-    (let [res (if (= \/ (first f)) f (io/resource f))]
-      (assert res (str "Can't find " f " in classpath"))
-      (.put ^javax.script.ScriptEngine (:jse repl-env)
-            javax.script.ScriptEngine/FILENAME f)
-      (load-stream repl-env res))))
-
 (defn analyze-file
   [f]
   (binding [*cljs-ns* 'cljs.user]
@@ -1021,78 +488,10 @@ goog.require = function(rule){Packages.clojure.lang.RT[\"var\"](\"cljs.compiler\
                 (analyze env r)
                 (recur (read pbr false eof false))))))))))
 
+
+(comment
+  
 (def loaded-libs (atom #{}))
-
-(defn goog-require [repl-env rule]
-  (when-not (contains? @loaded-libs rule)
-    (let [jse ^javax.script.ScriptEngine (:jse repl-env)
-          path (string/replace (munge rule) \. java.io.File/separatorChar)
-          cljs-path (str path ".cljs")
-          js-path (str "goog/" (.eval jse (str "goog.dependencies_.nameToPath['" rule "']")))]
-      (if-let [res (io/resource cljs-path)]
-        (binding [*cljs-ns* 'cljs.user]
-          (load-stream repl-env res))
-        (if-let [res (io/resource js-path)]
-          (.eval jse (io/reader res))
-          (throw (Exception. (str "Cannot find " cljs-path " or " js-path " in classpath")))))
-      (swap! loaded-libs conj rule))))
-
-(defn repl-env
-  "Returns a fresh JS environment, suitable for passing to repl.
-  Hang on to return for use across repl calls."
-  []
-  (let [jse (-> (javax.script.ScriptEngineManager.) (.getEngineByName "JavaScript"))
-        base (io/resource "goog/base.js")
-        deps (io/resource "goog/deps.js")
-        new-repl-env {:jse jse :global (.eval jse "this")}]
-    (assert base "Can't find goog/base.js in classpath")
-    (assert deps "Can't find goog/deps.js in classpath")
-    (.put jse javax.script.ScriptEngine/FILENAME "goog/base.js")
-    (.put jse "cljs_javascript_engine" new-repl-env)
-    (with-open [r (io/reader base)]
-      (.eval jse r))
-    (.eval jse bootjs)
-    ;; Load deps.js line-by-line to avoid 64K method limit
-    (doseq [^String line (line-seq (io/reader deps))]
-      (.eval jse line))
-    new-repl-env))
-
-(defn repl
-  "Note - repl will reload core.cljs every time, even if supplied old repl-env"
-  [repl-env & {:keys [verbose warn-on-undeclared]}]
-  (prn "Type: " :cljs/quit " to quit")
-  (binding [*cljs-ns* 'cljs.user
-            *cljs-verbose* verbose
-            *cljs-warn-on-undeclared* warn-on-undeclared]
-    (let [env {:context :statement :locals {}}]
-      (load-file repl-env "cljs/core.cljs")
-      (eval1 repl-env (assoc env :ns (@namespaces *cljs-ns*))
-             '(ns cljs.user))
-      (.put ^javax.script.ScriptEngine (:jse repl-env)
-            javax.script.ScriptEngine/FILENAME "<cljs repl>")
-      (loop []
-        (print (str "ClojureScript:" *cljs-ns* "> "))
-        (flush)
-        (let [form (read)]
-          (cond
-           (= form :cljs/quit) :quit
-           
-           (and (seq? form) (= (first form) 'in-ns))
-           (do (set! *cljs-ns* (second (second form))) (newline) (recur))
-
-           (and (seq? form) ('#{load-file clojure.core/load-file} (first form)))
-           (do (load-file repl-env (second form)) (newline) (recur))
-           
-           :else
-           (let [ret (eval1 repl-env
-                            (assoc env :ns (@namespaces *cljs-ns*))
-                            ;;form
-                            (list 'cljs.core.prn form)
-                            ;(list 'goog.global.print form)
-                            )]
-             ;(newline) (flush)
-             ;;(prn (if (nil? ret) nil ret))
-             (recur))))))))
 
 (defn forms-seq
   "Seq of forms in a Clojure or ClojureScript file."
@@ -1102,17 +501,6 @@ goog.require = function(rule){Packages.clojure.lang.RT[\"var\"](\"cljs.compiler\
      (if-let [form (read rdr nil nil)]
        (lazy-seq (cons form (forms-seq f rdr)))
        (.close rdr))))
-
-(defn rename-to-js
-  "Change the file extension from .cljs to .js. Takes a File or a
-  String. Always returns a String."
-  [file-str]
-  (clojure.string/replace file-str #".cljs$" ".js"))
-
-(defn mkdirs
-  "Create all parent directories for the passed file."
-  [^java.io.File f]
-  (.mkdirs (.getParentFile (.getCanonicalFile f))))
 
 (defmacro with-core-cljs
   "Ensure that core.cljs has been loaded."
@@ -1173,15 +561,6 @@ goog.require = function(rule){Packages.clojure.lang.RT[\"var\"](\"cljs.compiler\
            {:file dest-file})
          (throw (java.io.FileNotFoundException. (str "The file " src " does not exist.")))))))
 
-(comment
-  ;; flex compile-file
-  (do
-    (compile-file "/tmp/hello.cljs" "/tmp/something.js")
-    (slurp "/tmp/hello.js")
-
-    (compile-file "/tmp/somescript.cljs")
-    (slurp "/tmp/somescript.js")))
-
 (defn path-seq
   [file-str]
   (->> java.io.File/separator
@@ -1225,15 +604,7 @@ goog.require = function(rule){Packages.clojure.lang.RT[\"var\"](\"cljs.compiler\
                  ns-info (compile-file cljs-file output-file)]
              (recur (rest cljs-files) (conj output-files (assoc ns-info :file-name (.getPath output-file)))))
            output-files)))))
-
-(comment
-  ;; compile-root
-  ;; If you have a standard project layout with all file in src
-  (compile-root "src")
-  ;; will produce a mirrored directory structure under "out" but all
-  ;; files will be compiled to js.
-  )
-
+)
 (comment
 
 ;;the new way - use the REPL!!
