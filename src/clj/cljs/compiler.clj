@@ -378,16 +378,13 @@
       (assoc ret :op :var :info (resolve-existing-var env sym)))))
 
 (defn get-expander [sym env]
+  ;; FIXME proper macro expansion
   (let [mvar
         (when-not (-> env :locals sym)  ;locals hide macros
           (if-let [nstr (namespace sym)]
-            (when-let [ns (cond
-                           (= "clojure.core" nstr) (find-ns 'cljs.core)
-                           (.contains nstr ".") (find-ns (symbol nstr))
-                           :else
-                           (-> env :ns :requires-macros (get (symbol nstr))))]
+            (when-let [ns  (find-ns (symbol nstr))]
               (.findInternedVar ^clojure.lang.Namespace ns (symbol (name sym))))
-            (.findInternedVar ^clojure.lang.Namespace (find-ns 'cljs.core) sym)))]
+            (.getMapping ^clojure.lang.Namespace (find-ns *cljs-ns*) sym)))]
     (when (and mvar (.isMacro ^clojure.lang.Var mvar))
       @mvar)))
 
