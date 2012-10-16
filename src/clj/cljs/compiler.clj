@@ -13,7 +13,8 @@
   (:require [clojure.java.io :as io]
             [clojure.string :as string]
             [cljs.tagged-literals :as tags]
-            [cljs.analyzer :as ana])
+            [cljs.analyzer :as ana]
+            [cljs.optimizer :as opt])
   (:import java.lang.StringBuilder))
 
 (declare munge)
@@ -763,7 +764,7 @@
                deps nil]
           (if (seq forms)
             (let [env (ana/empty-env)
-                  ast (ana/analyze env (first forms))]
+                  ast (opt/optimize-toplevel-form (ana/analyze env (first forms)))]
               (do (emit ast)
                   (if (= (:op ast) :ns)
                     (recur (rest forms) (:name ast) (merge (:uses ast) (:requires ast)))
