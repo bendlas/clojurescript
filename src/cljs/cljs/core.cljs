@@ -1754,13 +1754,13 @@ reduces them without incurring seq initialization"
 
 (deftype Keyword [k]
   IFn
-  (invoke [_ coll]
+  (-invoke [_ coll]
     (when-not (nil? coll)
       (let [strobj (.-strobj coll)]
         (if (nil? strobj)
           (-lookup coll k nil)
           (aget strobj k)))))
-  (invoke [_ coll not-found]
+  (-invoke [_ coll not-found]
     (if (nil? coll)
       not-found
       (-lookup coll k not-found))))

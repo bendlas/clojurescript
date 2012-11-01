@@ -557,88 +557,26 @@
        ~@(apply concat prelude)
        (specify* ~osym ~@(apply concat proto-map)))))
 
-(defmacro extend-type [tsym & impls]
-  (let [resolve #(let [ret (:name (cljs.analyzer/resolve-var (dissoc &env :locals) %))]
-                   (assert ret (core/str "Can't resolve: " %))
-                   ret)
-        impl-map (loop [ret {} s impls]
+;; Extend js builtins
+(defn emit-extend-base-type [env t impls]
+  (let [impl-map (loop [ret {} s impls]
                    (if (seq s)
                      (recur (assoc ret (first s) (take-while seq? (next s)))
                             (drop-while seq? (next s)))
                      ret))
-        warn-if-not-protocol #(when-not (= 'Object %)
-                                (if cljs.analyzer/*cljs-warn-on-undeclared*
-                                  (if-let [var (cljs.analyzer/resolve-existing-var (dissoc &env :locals) %)]
-                                    (do
-                                     (when-not (:protocol-symbol var)
-                                       (cljs.analyzer/warning &env
-                                         (core/str "WARNING: Symbol " % " is not a protocol")))
-                                     (when (and cljs.analyzer/*cljs-warn-protocol-deprecated*
-                                                (-> var :deprecated)
-                                                (not (-> % meta :deprecation-nowarn)))
-                                       (cljs.analyzer/warning &env
-                                         (core/str "WARNING: Protocol " % " is deprecated"))))
-                                    (cljs.analyzer/warning &env
-                                      (core/str "WARNING: Can't resolve protocol symbol " %)))))
-        skip-flag (set (-> tsym meta :skip-protocol-flag))]
-    (if (base-type tsym)
-      (let [t (base-type tsym)
-            assign-impls (fn [[p sigs]]
-                           (warn-if-not-protocol p)
-                           (let [psym (resolve p)
-                                 pfn-prefix (subs (core/str psym) 0 (clojure.core/inc (.indexOf (core/str psym) "/")))]
-                             (cons `(aset ~psym ~t true)
-                                   (map (fn [[f & meths :as form]]
-                                          `(aset ~(symbol (core/str pfn-prefix f)) ~t ~(with-meta `(fn ~@meths) (meta form))))
-                                        sigs))))]
-        `(do ~@(mapcat assign-impls impl-map)))
-      (let [t (resolve tsym)
-            prototype-prefix (fn [sym]
-                               `(.. ~tsym -prototype ~(to-property sym)))
-            assign-impls (fn [[p sigs]]
-                           (warn-if-not-protocol p)
-                           (let [psym (resolve p)
-                                 pprefix (protocol-prefix psym)]
-                             (if (= p 'Object)
-                               (let [adapt-params (fn [[sig & body]]
-                                                    (let [[tname & args] sig]
-                                                      (list (vec args) (list* 'this-as (vary-meta tname assoc :tag t) body))))]
-                                 (map (fn [[f & meths :as form]]
-                                        `(set! ~(prototype-prefix f)
-                                               ~(with-meta `(fn ~@(map adapt-params meths)) (meta form))))
-                                      sigs))
-                               (concat (when-not (skip-flag psym)
-                                         [`(set! ~(prototype-prefix pprefix) true)])
-                                       (mapcat (fn [[f & meths :as form]]
-                                                 (if (= psym 'cljs.core/IFn)
-                                                   (let [adapt-params (fn [[[targ & args :as sig] & body]]
-                                                                        (let [this-sym (with-meta (gensym "this-sym") {:tag t})]
-                                                                          `(~(vec (cons this-sym args))
-                                                                            (this-as ~this-sym
-                                                                                     (let [~targ ~this-sym]
-                                                                                       ~@body)))))
-                                                         meths (map adapt-params meths)
-                                                         this-sym (with-meta (gensym "this-sym") {:tag t})
-                                                         argsym (gensym "args")]
-                                                     [`(set! ~(prototype-prefix 'call) ~(with-meta `(fn ~@meths) (meta form)))
-                                                      `(set! ~(prototype-prefix 'apply)
-                                                             ~(with-meta
-                                                                `(fn ~[this-sym argsym]
-                                                                   (.apply (.-call ~this-sym) ~this-sym
-                                                                           (.concat (array ~this-sym) (aclone ~argsym))))
-                                                                (meta form)))])
-                                                   (let [pf (core/str pprefix f)
-                                                         adapt-params (fn [[[targ & args :as sig] & body]]
-                                                                        (cons (vec (cons (vary-meta targ assoc :tag t) args))
-                                                                              body))]
-                                                     (if (vector? (first meths))
-                                                       [`(set! ~(prototype-prefix (core/str pf "$arity$" (count (first meths)))) ~(with-meta `(fn ~@(adapt-params meths)) (meta form)))]
-                                                       (map (fn [[sig & body :as meth]]
-                                                              `(set! ~(prototype-prefix (core/str pf "$arity$" (count sig)))
-                                                                     ~(with-meta `(fn ~(adapt-params meth)) (meta form))))
-                                                            meths)))))
-                                               sigs)))))]
-        `(do ~@(mapcat assign-impls impl-map))))))
+        assign-impls (fn [[p sigs]]
+                       (let [psym (resolve-protocol-symbol env p)
+                             pfn-prefix (subs (core/str psym) 0 (clojure.core/inc (.indexOf (core/str psym) "/")))]
+                         (cons `(aset ~psym ~t true)
+                               (map (fn [[f & meths :as form]]
+                                      `(aset ~(symbol (core/str pfn-prefix f)) ~t ~(with-meta `(fn ~@meths) (meta form))))
+                                    sigs))))]
+    `(do ~@(mapcat assign-impls impl-map) ~t)))
+
+(defmacro extend-type [tsym & impls]
+  (if-let [t (base-type tsym)]
+    (emit-extend-base-type &env t impls)
+    `(specify ~(with-meta `(.-prototype ~tsym) (meta tsym)) ~@impls)))
 
 (defn- prepare-protocol-masks [env t impls]
   (let [resolve #(let [ret (:name (cljs.analyzer/resolve-var (dissoc env :locals) %))]
