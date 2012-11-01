@@ -1312,6 +1312,19 @@
         (assert (= (count s1) 2))
         (assert (= (count s2) 2)))))
 
+  ;; specify
+  (defprotocol ^:deprecated ShouldWarnDeprecated)
+  (defprotocol ^:deprecated ShouldNotWarn!!)
+  (let [flag   (specify (js-obj)
+                 ShouldWarnNoProtocol
+                 ShouldWarnDeprecated
+                 ^:deprecation-nowarn ShouldNotWarn!!)
+        noflag (specify ^:skip-protocol-flag (js-obj)
+                        ISeq (-first [_] "works anyway"))]
+    (assert (satisfies? ShouldWarnDeprecated flag))
+    (assert (not (satisfies? ISeq noflag)))
+    (assert (= "works anyway" (-first noflag))))
+  
   ;; defrecord
   (defrecord Person [firstname lastname])
   (def fred (Person. "Fred" "Mertz"))
@@ -1663,7 +1676,7 @@
   ;;; pr-str backwards compatibility
 
   (deftype PrintMeBackwardsCompat [a b]
-    IPrintable
+    ^:deprecation-nowarn IPrintable
     (-pr-seq [_ _] (list (str "<<<" a " " b ">>>"))))
 
   (assert (= (pr-str (PrintMeBackwardsCompat. 1 2)) "<<<1 2>>>"))
