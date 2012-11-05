@@ -1324,7 +1324,10 @@
     (assert (satisfies? ShouldWarnDeprecated flag))
     (assert (not (satisfies? ISeq noflag)))
     (assert (= "works anyway" (-first noflag))))
-  
+
+  (let [o (specify* (js-obj) IFn {-invoke {2 (fn [o a] [o a])}})]
+    (assert (= [o :a] (o :a))))
+
   ;; defrecord
   (defrecord Person [firstname lastname])
   (def fred (Person. "Fred" "Mertz"))

@@ -456,6 +456,24 @@
            (vary-meta (:name existing) merge (meta psym))
            psym)))))
 
+(defn emit-ifn-call-meth [arity-exprs]
+  (let [ps (map (fn [_] (gensym "arg-")) (range (core/dec (apply core/max
+                                                                (keys arity-exprs)))))
+        atup #(take (core/dec %) ps)]
+    (list* `fn
+           (for [[a e] arity-exprs]
+             `(~(vec (cons '_ (atup a)))
+               (this-as this# (~e this# ~@(atup a))))))))
+
+(defn emit-specify*-ifn [oprefix methods]
+  (assert (= 1 (count methods)) "IFn only has -invoke")
+  (let [[m arities] (first methods)
+        _ (assert (= '-invoke m) "IFn only has -invoke")
+        syms (into {} (map #(vector % (symbol (core/str "arity__" %))) (keys arities)))]
+    `(let ~(vec (mapcat (fn [[a expr]] [(syms a) expr]) arities))
+       (set! ~(oprefix 'call) ~(emit-ifn-call-meth syms))
+       (set! ~(oprefix 'apply) ifn-apply-method))))
+
 (defmacro specify*
   "Let an instance implement protocols, with a syntax loosely based on extend. Implementing closures are passed along with explicit arities:
 
@@ -467,22 +485,28 @@
 
   This allows to attach existing closures as protocol methods to an object, which can be helpful if performance is critical. Implementations can also be passed inline, as specify does.
 
-  Caveats: specify* doesn't rewrite IFn.-invoke implementations into .call and .apply, thus isn't useable to implement IFn. Also it doesn't do methods without a protocol (Object).
-  Use specify for those."
-  [osym & proto+mmaps]
-  (assert (symbol? osym) "specify* takes its subject as a symbol")
-  (let [oprefix (fn [field] `(. ~osym ~(to-property field)))]
-    `(do ~@(apply concat
-                  (for [[proto methods] (partition 2 proto+mmaps)
-                        :let [psym (resolve-protocol-symbol &env proto true)
-                              pprefix (protocol-prefix psym)]]
-                    (cons
-                     (when-not (-> osym meta :skip-protocol-flag)
-                       `(set! ~(oprefix pprefix) true))
-                     (for [[method arities] methods
-                           [arity impl] arities]
-                       `(set! ~(oprefix (core/str pprefix method "$arity$" arity)) ~impl)))))
-         ~osym)))
+  Caveats: specify* doesn't do protocol less methods (Object pseudo protocol).
+  Use specify for that or assign directly."
+  [oexpr & proto+mmaps]
+  (if-not (symbol? oexpr)
+    (let [osym (with-meta (gensym "specify-target-") (meta oexpr))]
+      `(let [~osym ~oexpr]
+         (specify* ~osym ~@proto+mmaps)))
+    (let [osym oexpr
+          oprefix (fn [field] `(. ~osym ~(to-property field)))]
+      `(do ~@(apply concat
+                    (for [[proto methods] (partition 2 proto+mmaps)
+                          :let [psym (resolve-protocol-symbol &env proto true)
+                                pprefix (protocol-prefix psym)]]
+                      (if (= psym 'cljs.core/IFn)
+                        [(emit-specify*-ifn oprefix methods)]
+                        (cons
+                         (when-not (-> osym meta :skip-protocol-flag)
+                           `(set! ~(oprefix pprefix) true))
+                         (for [[method arities] methods
+                               [arity impl] arities]
+                           `(set! ~(oprefix (core/str pprefix method "$arity$" arity)) ~impl))))))
+           ~osym))))
 
 
 ;; Methods without a protocol, e.g. toString
@@ -501,7 +525,7 @@
     (list fntail)
     fntail))
 
-;; Fast path for IFn implementors
+;; This emits .call for specify this also allows field references for fn bodies
 (defn emit-ifn-methods [tag osym sigs]
   (assert (= 1 (count sigs)) "IFn only has invoke")
   (assert (= '-invoke (ffirst sigs)) (core/str "IFn only has -invoke: " (first sigs)))
@@ -514,11 +538,7 @@
         meths (map adapt-params (fn-arities (first sigs)))
         argsym (gensym "args")]
     [`(set! (.-call ~osym) ~(with-meta `(fn ~@meths) fmeta))
-     `(set! (.-apply ~osym)
-            ~(with-meta `(fn [~this-sym args#]
-                           (.apply (.-call ~this-sym) ~this-sym
-                                   (.concat (array ~this-sym) args#)))
-               fmeta))]))
+     `(set! (.-apply ~osym) ifn-apply-method)]))
 
 (defmacro specify
   "Let an instance implement a protocol by passing method bodies. Similar interface to extend-type."

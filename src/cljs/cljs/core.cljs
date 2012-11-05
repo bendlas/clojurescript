@@ -80,6 +80,12 @@
    (.join (array "No protocol method " proto
                  " defined for type " (goog/typeOf obj) ": " obj) "")))
 
+(defn ifn-apply-method
+  "Internal - do not use!"
+  [this args]
+  (.apply (.-call this)
+          this (.concat (array this) args)))
+
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;; arrays ;;;;;;;;;;;;;;;;
 
 (defn aclone
