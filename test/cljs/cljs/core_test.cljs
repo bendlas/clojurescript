@@ -1378,6 +1378,31 @@
         (assert (= (count s1) 2))
         (assert (= (count s2) 2)))))
 
+  ;; specify
+  (defprotocol ^:deprecated Should_Warn_Deprecated)
+  (defprotocol ^:deprecated Should_Not_Warn!!)
+  (let [flag   (specify (js-obj)
+                 Should_Warn_No_Protocol
+                 Should_Warn_Deprecated
+                 ^:deprecation-nowarn Should_Not_Warn!!)
+        noflag (specify ^:skip-protocol-flag (js-obj)
+                        ISeq (-first [_] "works anyway"))
+        someflag (specify ^{:skip-protocol-flag '[cljs.core/ISeq]} (js-obj)
+                        INamed (-name [_] "someflag")
+                        ISeq (-first [_] "works anyway"))]
+
+    (assert (satisfies? ShouldWarnDeprecated flag))
+
+    (assert (not (satisfies? ISeq noflag)))
+    (assert (= "works anyway" (-first noflag)))
+
+    (assert (not (satisfies? ISeq someflagflag)))
+    (assert (satisifies? INamed))
+    (assert (= "someflag" (name someflag))))
+
+  (let [o (specify* (js-obj) IFn {-invoke {2 (fn [o a] [o a])}})]
+    (assert (= [o :a] (o :a))))
+
   ;; defrecord
   (defrecord Person [firstname lastname])
   (def fred (Person. "Fred" "Mertz"))
