@@ -53,7 +53,8 @@
            com.google.javascript.jscomp.JSSourceFile
            com.google.javascript.jscomp.Result
            com.google.javascript.jscomp.JSError
-           com.google.javascript.jscomp.CommandLineRunner))
+           com.google.javascript.jscomp.CommandLineRunner
+           com.google.javascript.jscomp.AnonymousFunctionNamingPolicy))
 
 (defmacro ^:private debug-prn
   [& args]
@@ -84,6 +85,9 @@
 (defn set-options
   "TODO: Add any other options that we would like to support."
   [opts ^CompilerOptions compiler-options]
+  (when (:debug opts)
+    (set! (.generatePseudoNames compiler-options) true)
+    (set! (.anonymousFunctionNaming compiler-options) AnonymousFunctionNamingPolicy/UNMAPPED))
   (when (contains? opts :pretty-print)
     (set! (.prettyPrint compiler-options) (:pretty-print opts)))
   (when (contains? opts :print-input-delimiter)

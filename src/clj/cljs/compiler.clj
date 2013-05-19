@@ -807,7 +807,8 @@
 
 (defn parse-ns [src dest opts]
   (with-core-cljs
-    (binding [ana/*cljs-ns* 'cljs.user]
+    (binding [ana/*cljs-ns* 'cljs.user
+              *data-readers* tags/*cljs-data-readers*]
       (loop [forms (forms-seq src)]
         (if (seq forms)
           (let [env (ana/empty-env)
