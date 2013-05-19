@@ -20,7 +20,7 @@ echo "## Compiling clojurescript"
 echo "# (scr) Script compilation with {:optimizations :none} deactivated until fixed"
 #FIXME compile "scr" "{:optimizations :none}" out/core-test.js
 compile "whi" "{:optimizations :whitespace :pretty-print true}" out/core-whitespace-test.js
-compile "adv" "{:optimizations :advanced}" out/core-advanced-test.js
+compile "adv" "{:optimizations :advanced :debug true :pretty-print true}" out/core-advanced-test.js
 
 echo
 
