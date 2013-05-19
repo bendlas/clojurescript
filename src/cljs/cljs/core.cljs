@@ -27,6 +27,17 @@
   "Set *print-fn* to f."
   [f] (set! *print-fn* f))
 
+(def ^:dynamic *flush-on-newline* true)
+(def ^:dynamic *print-readably* true)
+(def ^:dynamic *print-meta* false)
+(def ^:dynamic *print-dup* false)
+
+(defn- pr-opts []
+  {:flush-on-newline *flush-on-newline*
+   :readably *print-readably*
+   :meta *print-meta*
+   :dup *print-dup*})
+
 (def
   ^{:doc "bound in a repl thread to the most recent value printed"}
   *1)
@@ -140,8 +151,10 @@
 
 (defn aset
   "Sets the value at the index."
-  [array i val]
-  (cljs.core/aset array i val))
+  ([array i val]
+    (cljs.core/aset array i val))
+  ([array idx idx2 & idxv]
+    (apply aset (aget array idx) idx2 idxv)))
 
 (defn alength
   "Returns the length of the array. Works on arrays of all types."
@@ -337,6 +350,23 @@
   (-name [x])
   (-namespace [x]))
 
+;; Printing support
+
+(deftype StringBufferWriter [sb]
+  IWriter
+  (-write [_ s] (.append sb s))
+  (-flush [_] nil))
+
+(defn pr-str*
+  "Support so that collections can implement toString without
+   loading all the printing machinery."
+  [^not-native obj]
+  (let [sb (gstring/StringBuffer.)
+        writer (StringBufferWriter. sb)]
+    (-pr-writer obj writer (pr-opts))
+    (-flush writer)
+    (str sb)))
+
 ;;;;;;;;;;;;;;;;;;; symbols ;;;;;;;;;;;;;;;
 
 (declare list hash-combine hash Symbol)
@@ -403,10 +433,12 @@
       (-seq ^not-native coll)
 
       (array? coll)
-      (IndexedSeq. coll 0)
+      (when-not (zero? (alength coll))
+        (IndexedSeq. coll 0))
 
       (string? coll)
-      (IndexedSeq. coll 0)
+      (when-not (zero? (alength coll))
+        (IndexedSeq. coll 0))
 
       (type_satisfies_ ILookup coll)
       (-seq coll)
@@ -625,6 +657,10 @@ reduces them without incurring seq initialization"
   [x] (satisfies? IIndexed x))
 
 (deftype IndexedSeq [arr i]
+  Object
+  (toString [coll]
+   (pr-str* coll))
+
   ISeqable
   (-seq [this] this)
 
@@ -700,6 +736,10 @@ reduces them without incurring seq initialization"
 (declare with-meta)
 
 (deftype RSeq [ci i meta]
+  Object
+  (toString [coll]
+    (pr-str* coll))
+
   IMeta
   (-meta [coll] meta)
   IWithMeta
@@ -1787,6 +1827,10 @@ reduces them without incurring seq initialization"
 
 ;;;;;;;;;;;;;;;; cons ;;;;;;;;;;;;;;;;
 (deftype List [meta first rest count ^:mutable __hash]
+  Object
+  (toString [coll]
+    (pr-str* coll))
+
   IList
 
   IWithMeta
@@ -1833,6 +1877,10 @@ reduces them without incurring seq initialization"
   (-count [coll] count))
 
 (deftype EmptyList [meta]
+  Object
+  (toString [coll]
+    (pr-str* coll))
+
   IList
 
   IWithMeta
@@ -1902,6 +1950,10 @@ reduces them without incurring seq initialization"
         r))))
 
 (deftype Cons [meta first rest ^:mutable __hash]
+  Object
+  (toString [coll]
+    (pr-str* coll))
+
   IList
 
   IWithMeta
@@ -1994,6 +2046,10 @@ reduces them without incurring seq initialization"
         (.-x lazy-seq)))))
 
 (deftype LazySeq [meta realized x ^:mutable __hash]
+  Object
+  (toString [coll]
+    (pr-str* coll))
+
   IWithMeta
   (-with-meta [coll meta] (LazySeq. meta realized x __hash))
 
@@ -2076,6 +2132,10 @@ reduces them without incurring seq initialization"
      (ArrayChunk. arr off end)))
 
 (deftype ChunkedCons [chunk more meta ^:mutable __hash]
+  Object
+  (toString [coll]
+    (pr-str* coll))
+  
   IWithMeta
   (-with-meta [coll m]
     (ChunkedCons. chunk more m __hash))
@@ -3063,6 +3123,10 @@ reduces them without incurring seq initialization"
          pr-sequential-writer pr-writer chunked-seq)
 
 (deftype PersistentVector [meta cnt shift root tail ^:mutable __hash]
+  Object
+  (toString [coll]
+    (pr-str* coll))
+
   IWithMeta
   (-with-meta [coll meta] (PersistentVector. meta cnt shift root tail __hash))
 
@@ -3226,6 +3290,10 @@ reduces them without incurring seq initialization"
 (defn vector [& args] (vec args))
 
 (deftype ChunkedSeq [vec node i off meta ^:mutable __hash]
+  Object
+  (toString [coll]
+    (pr-str* coll))
+
   IWithMeta
   (-with-meta [coll m]
     (chunked-seq vec node i off m))
@@ -3298,6 +3366,10 @@ reduces them without incurring seq initialization"
 (declare build-subvec)
 
 (deftype Subvec [meta v start end ^:mutable __hash]
+  Object
+  (toString [coll]
+    (pr-str* coll))
+
   IWithMeta
   (-with-meta [coll meta] (build-subvec meta v start end __hash))
 
@@ -3578,6 +3650,10 @@ reduces them without incurring seq initialization"
 ;;; PersistentQueue ;;;
 
 (deftype PersistentQueueSeq [meta front rear ^:mutable __hash]
+  Object
+  (toString [coll]
+    (pr-str* coll))
+
   IWithMeta
   (-with-meta [coll meta] (PersistentQueueSeq. meta front rear __hash))
 
@@ -3610,6 +3686,10 @@ reduces them without incurring seq initialization"
   (-seq [coll] coll))
 
 (deftype PersistentQueue [meta count front rear ^:mutable __hash]
+  Object
+  (toString [coll]
+    (pr-str* coll))
+
   IWithMeta
   (-with-meta [coll meta] (PersistentQueue. meta count front rear __hash))
 
@@ -3723,6 +3803,10 @@ reduces them without incurring seq initialization"
     new-obj))
 
 (deftype ObjMap [meta keys strobj update-count ^:mutable __hash]
+  Object
+  (toString [coll]
+    (pr-str* coll))
+
   IWithMeta
   (-with-meta [coll meta] (ObjMap. meta keys strobj update-count __hash))
 
@@ -3891,6 +3975,10 @@ reduces them without incurring seq initialization"
 (declare TransientArrayMap)
 
 (deftype PersistentArrayMap [meta cnt arr ^:mutable __hash]
+  Object
+  (toString [coll]
+    (pr-str* coll))
+
   IWithMeta
   (-with-meta [coll meta] (PersistentArrayMap. meta cnt arr __hash))
 
@@ -4587,6 +4675,10 @@ reduces them without incurring seq initialization"
                (.inode-assoc! edit shift key2hash key2 val2 added-leaf?)))))))
 
 (deftype NodeSeq [meta nodes i s ^:mutable __hash]
+  Object
+  (toString [coll]
+    (pr-str* coll))
+
   IMeta
   (-meta [coll] meta)
 
@@ -4644,6 +4736,10 @@ reduces them without incurring seq initialization"
        (NodeSeq. nil nodes i s nil))))
 
 (deftype ArrayNodeSeq [meta nodes i s ^:mutable __hash]
+  Object
+  (toString [coll]
+    (pr-str* coll))
+
   IMeta
   (-meta [coll] meta)
 
@@ -4693,6 +4789,10 @@ reduces them without incurring seq initialization"
 (declare TransientHashMap)
 
 (deftype PersistentHashMap [meta cnt root ^boolean has-nil? nil-val ^:mutable __hash]
+  Object
+  (toString [coll]
+    (pr-str* coll))
+
   IWithMeta
   (-with-meta [coll meta] (PersistentHashMap. meta cnt root has-nil? nil-val __hash))
 
@@ -4911,6 +5011,10 @@ reduces them without incurring seq initialization"
       stack)))
 
 (deftype PersistentTreeMapSeq [meta stack ^boolean ascending? cnt ^:mutable __hash]
+  Object
+  (toString [coll]
+    (pr-str* coll))
+
   ISeqable
   (-seq [this] this)
 
@@ -5409,6 +5513,10 @@ reduces them without incurring seq initialization"
 
 (deftype PersistentTreeMap [comp tree cnt meta ^:mutable __hash]
   Object
+  (toString [coll]
+    (pr-str* coll))
+
+  Object
   (entry-at [coll k]
     (loop [t tree]
       (if-not (nil? t)
@@ -5637,6 +5745,10 @@ reduces them without incurring seq initialization"
 (declare TransientHashSet)
 
 (deftype PersistentHashSet [meta hash-map ^:mutable __hash]
+  Object
+  (toString [coll]
+    (pr-str* coll))
+
   IWithMeta
   (-with-meta [coll meta] (PersistentHashSet. meta hash-map __hash))
 
@@ -5742,6 +5854,10 @@ reduces them without incurring seq initialization"
       k)))
 
 (deftype PersistentTreeSet [meta tree-map ^:mutable __hash]
+  Object
+  (toString [coll]
+    (pr-str* coll))
+
   IWithMeta
   (-with-meta [coll meta] (PersistentTreeSet. meta tree-map __hash))
 
@@ -5989,6 +6105,10 @@ reduces them without incurring seq initialization"
                    (if ((mk-bound-fn sc end-test end-key) e) s (next s))))))
 
 (deftype Range [meta start end step ^:mutable __hash]
+  Object
+  (toString [coll]
+    (pr-str* coll))
+
   IWithMeta
   (-with-meta [rng meta] (Range. meta start end step __hash))
 
@@ -6253,11 +6373,6 @@ reduces them without incurring seq initialization"
          (fn [match] (aget char-escapes match)))
        \"))
 
-(deftype StringBufferWriter [sb]
-  IWriter
-  (-write [_ s] (.append sb s))
-  (-flush [_] nil))
-
 (defn- pr-writer
   "Prefer this to pr-seq, because it makes the printing function
    configurable, allowing efficient implementations such as appending
@@ -6371,17 +6486,6 @@ reduces them without incurring seq initialization"
   (string-print "\n")
   (when (get opts :flush-on-newline)
     (flush)))
-
-(def *flush-on-newline* true)
-(def *print-readably* true)
-(def *print-meta* false)
-(def *print-dup* false)
-
-(defn- pr-opts []
-  {:flush-on-newline *flush-on-newline*
-   :readably *print-readably*
-   :meta *print-meta*
-   :dup *print-dup*})
 
 (defn pr-str
   "pr to a string, returning it. Fundamental entrypoint to IPrintWithWriter."

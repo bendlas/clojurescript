@@ -231,6 +231,10 @@
   (assert (= [3 2 1] (seq (array 3 2 1))))
   (assert (= 9 (reduce + (next (seq (array 1 2 3 4))))))
   (assert (= () (rest nil)))
+  (assert (= nil (seq (array))))
+  (assert (= nil (seq "")))
+  (assert (= nil (seq [])))
+  (assert (= nil (seq {})))
   (assert (= () (rest ())))
   (assert (= () (rest [1])))
   (assert (= () (rest (array 1))))
@@ -668,7 +672,11 @@
     (assert (= (aget a 0 1) 2))
     (assert (= (apply aget a [0 1]) 2))
     (assert (= (aget a 1 1) 5))
-    (assert (= (apply aget a [1 1]) 5)))
+    (assert (= (apply aget a [1 1]) 5))
+    (aset a 0 0 "foo")
+    (assert (= (aget a 0 0) "foo"))
+    (apply aset a [0 0 "bar"])
+    (assert (= (aget a 0 0) "bar")))
 
   ;; sort
   (assert (= [1 2 3 4 5] (sort [5 3 1 4 2])))
@@ -689,6 +697,7 @@
   ;; js->clj
   (assert (= {"a" 1, "b" 2} (js->clj (js* "{\"a\":1,\"b\":2}"))))
   (assert (= {"a" nil} (js->clj (js* "{\"a\":null}"))))
+  (assert (= {} (js->clj (js* "{}"))))
   (assert (= {"a" true, "b" false} (js->clj (js* "{\"a\":true,\"b\":false}"))))
   (assert (= {:a 1, :b 2} (js->clj (js* "{\"a\":1,\"b\":2}") :keywordize-keys true)))
   (assert (= [[{:a 1, :b 2} {:a 1, :b 2}]]
