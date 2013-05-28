@@ -559,23 +559,45 @@
            (vary-meta (:name existing) merge (meta psym))
            psym)))))
 
-(defn emit-ifn-call-meth [arity-exprs]
-  (let [ps (map (fn [_] (gensym "arg-")) (range (core/dec (apply core/max
-                                                                (keys arity-exprs)))))
-        atup #(take (core/dec %) ps)]
-    (list* `fn
-           (for [[a e] arity-exprs]
-             `(~(vec (cons '_ (atup a)))
-               (this-as this# (~e this# ~@(atup a))))))))
+(defn emit-arity-name [psym method arity]
+  (symbol (core/str (protocol-prefix psym) method "$arity$" arity)))
 
-(defn emit-specify*-ifn [oprefix methods]
-  (assert (= 1 (count methods)) "IFn only has -invoke")
-  (let [[m arities] (first methods)
-        _ (assert (= '-invoke m) "IFn only has -invoke")
-        syms (into {} (map #(vector % (symbol (core/str "arity__" %))) (keys arities)))]
-    `(let ~(vec (mapcat (fn [[a expr]] [(syms a) expr]) arities))
-       (set! ~(oprefix 'call) ~(emit-ifn-call-meth syms))
-       (set! ~(oprefix 'apply) ifn-apply-method))))
+(defn emit-call-method [arities]
+  (cons 'fn
+        (for [[n _] arities
+              :let [[this :as args] (map #(core/symbol (core/str "arg-" (core/inc %)))
+                                         (core/range n))]]
+          `(~(vec args)
+            (this-as this#
+                     (. this#
+                        ~(emit-arity-name 'cljs.core/IFn '-invoke (core/dec n))
+                        ~@(rest args)))))))
+
+(defn emit-invoke-method [arity impl]
+  (let [args (map #(core/symbol (core/str "arg-" (core/inc %)))
+                  (core/range arity))]
+    `(fn ~(vec args)
+       (~'js* "var self__ = this;")
+       (. ~impl ~'call (~'js* "this") (~'js* "this") ~@args))))
+
+(defn emit-ifn-impl [osym methods]
+  (assert (= 1 (count methods)) "Only one method on IFn")
+  (let [m (or (core/get methods '-invoke)
+              (throw (Exception. "No -invoke method found")))]
+    (list*
+     `(set! (. ~osym ~'-call)
+            ~(emit-call-method m))
+     `(set! (. ~osym ~'-cljs$lang$maxFixedArity)
+            ~(core/dec (core/apply core/max (keys m))))
+     `(set! (. ~osym ~'-cljs$lang$applyTo)
+            (~'fn [args#]
+              (apply-to (~'js* "this") (count args#) args#)))
+     (for [[arity impl] m]
+       `(set! 
+         (. ~osym
+            ~(to-property 
+              (emit-arity-name 'cljs.core/IFn '-invoke (core/dec arity)))) 
+         ~(emit-invoke-method (core/dec arity) impl))))))
 
 (defmacro specify*
   "Let an instance implement protocols, with a syntax loosely based on extend. Implementing closures are passed along with explicit arities:
@@ -603,16 +625,15 @@
                        (set skip-meta))]
       `(do ~@(apply concat
                     (for [[proto methods] (partition 2 proto+mmaps)
-                          :let [psym (resolve-protocol-symbol &env proto true)
-                                pprefix (protocol-prefix psym)]]
-                      (if (= psym 'cljs.core/IFn)
-                        [(emit-specify*-ifn oprefix methods)]
-                        (cons
-                         (when-not (skip-flag? psym)
-                           `(set! ~(oprefix pprefix) true))
+                          :let [psym (resolve-protocol-symbol &env proto true)]]
+                      (cons
+                       (when-not (skip-flag? psym)
+                         `(set! ~(oprefix (protocol-prefix psym)) true))
+                       (if (= psym 'cljs.core/IFn)
+                         (emit-ifn-impl osym methods)
                          (for [[method arities] methods
                                [arity impl] arities]
-                           `(set! ~(oprefix (core/str pprefix method "$arity$" arity)) ~impl))))))
+                           `(set! ~(oprefix (emit-arity-name psym method arity)) ~impl))))))
            ~osym))))
 
 
@@ -631,21 +652,6 @@
   (if (vector? (first fntail))
     (list fntail)
     fntail))
-
-;; This emits .call for specify this also allows field references for fn bodies
-(defn emit-ifn-methods [tag osym sigs]
-  (assert (= 1 (count sigs)) "IFn only has invoke")
-  (assert (= '-invoke (ffirst sigs)) (core/str "IFn only has -invoke: " (first sigs)))
-  (let [fmeta (meta (first sigs))
-        this-sym (with-meta (gensym "this-sym") {:tag tag})
-        adapt-params (fn [[[targ & args :as sig] & body]]
-                       `(~(vec (cons '_ args))
-                         (this-as ~this-sym
-                           (let [~targ ~this-sym] ~@body))))
-        meths (map adapt-params (fn-arities (first sigs)))
-        argsym (gensym "args")]
-    [`(set! (.-call ~osym) ~(with-meta `(fn ~@meths) fmeta))
-     `(set! (.-apply ~osym) ifn-apply-method)]))
 
 (defmacro specify
   "Let an instance implement a protocol by passing method bodies. Similar interface to extend-type."
@@ -669,9 +675,6 @@
                                                    next-impls (drop-while seq? rst)]
                                                (core/condp = (resolve-protocol-symbol &env proto)
                                                  'Object        (recur (conj prelude (emit-object-methods tag osym sigs))
-                                                                       proto-map
-                                                                       next-impls)
-                                                 'cljs.core/IFn (recur (conj prelude (emit-ifn-methods tag osym sigs))
                                                                        proto-map
                                                                        next-impls)
                                                  ; default

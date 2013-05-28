@@ -1396,17 +1396,17 @@
                  ^:deprecation-nowarn Should_Not_Warn!!)
         noflag (specify ^:skip-protocol-flag (js-obj)
                         ISeq (-first [_] "works anyway"))
-        someflag (specify ^{:skip-protocol-flag '[cljs.core/ISeq]} (js-obj)
+        someflag (specify ^{:skip-protocol-flag [cljs.core/ISeq]} (js-obj)
                         INamed (-name [_] "someflag")
                         ISeq (-first [_] "works anyway"))]
 
-    (assert (satisfies? ShouldWarnDeprecated flag))
+    (assert (satisfies? Should_Warn_Deprecated flag))
 
     (assert (not (satisfies? ISeq noflag)))
     (assert (= "works anyway" (-first noflag)))
 
-    (assert (not (satisfies? ISeq someflagflag)))
-    (assert (satisifies? INamed))
+    (assert (not (satisfies? ISeq someflag)))
+    (assert (satisfies? INamed someflag))
     (assert (= "someflag" (name someflag))))
 
   (let [o (specify* (js-obj) IFn {-invoke {2 (fn [o a] [o a])}})]
