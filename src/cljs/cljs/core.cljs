@@ -731,7 +731,11 @@ reduces them without incurring seq initialization"
 
 (extend-type array
   ICounted
-  (-count [a] (alength a)))
+  (-count [a] (alength a))
+
+  IReduce
+  (-reduce [col f] (array-reduce col f))
+  (-reduce [col f start] (array-reduce col f start)))
 
 (declare with-meta)
 
@@ -1874,7 +1878,11 @@ reduces them without incurring seq initialization"
   (-seq [coll] coll)
 
   ICounted
-  (-count [coll] count))
+  (-count [coll] count)
+
+  IReduce
+  (-reduce [col f] (seq-reduce f col))
+  (-reduce [col f start] (seq-reduce f start col)))
 
 (deftype EmptyList [meta]
   Object
@@ -3790,7 +3798,7 @@ reduces them without incurring seq initialization"
           (recur (inc i) (assoc! out k (aget so k))))
         (with-meta (persistent! (assoc! out k v)) mm)))))
 
-;;; ObjMap
+;;; ObjMap - DEPRECATED
 
 (defn- obj-clone [obj ks]
   (let [new-obj (js-obj)
@@ -4168,10 +4176,10 @@ reduces them without incurring seq initialization"
         tcoll)
       (throw (js/Error. "dissoc! after persistent!")))))
 
-(declare TransientHashMap)
+(declare TransientHashMap PersistentHashMap)
 
 (defn- array->transient-hash-map [len arr]
-  (loop [out (transient {})
+  (loop [out (transient cljs.core.PersistentHashMap/EMPTY)
          i   0]
     (if (< i len)
       (recur (assoc! out (aget arr i) (aget arr (inc i))) (+ i 2))
@@ -6443,6 +6451,14 @@ reduces them without incurring seq initialization"
                   "00:00\""))
 
               (regexp? obj) (write-all writer "#\"" (.-source obj) "\"")
+
+              ^boolean (goog/isObject obj)
+              (let [pr-pair
+                    (fn [keyval]
+                      (pr-sequential-writer writer pr-writer "" ": " "" opts keyval))]
+                (pr-sequential-writer
+                  writer pr-pair "#<Object {" ", " "}>" opts
+                  (map #(vector % (aget obj %)) (js-keys obj))))
 
               :else (write-all writer "#<" (str obj) ">")))))
 
