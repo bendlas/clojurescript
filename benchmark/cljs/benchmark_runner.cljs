@@ -251,4 +251,12 @@
 (simple-benchmark [a (Box. 0) xs (vec (range 512))] (doseq [x xs y xs] (set! a -val (+ (.-val a) x))) 4)
 (println)
 
+(println ";;; collections as functions")
+(simple-benchmark [coll [1 2 3]] (coll 1) 1000000)
+(simple-benchmark [coll #{1 2 3}] (coll 2) 1000000)
+(simple-benchmark [coll (sorted-set 1 2 3)] (coll 2) 1000000)
+(simple-benchmark [coll (array-map :a 1 :b 2 :c 3)] (coll :b) 1000000)
+(simple-benchmark [coll (hash-map :a 1 :b 2 :c 3)] (coll :b) 1000000)
+(simple-benchmark [coll (sorted-map :a 1 :b 2 :c 3)] (coll :b) 1000000)
+
 (println "\n")
