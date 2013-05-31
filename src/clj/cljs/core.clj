@@ -538,6 +538,12 @@
 (defn to-property [sym]
   (symbol (core/str "-" sym)))
 
+(defn resolve-type-symbol [env tsym]
+  (if-let [{sym :name} (cljs.analyzer/resolve-var (dissoc env :locals) 
+                                                  tsym)]
+    sym
+    (throw (Exception. (core/str "Can't resolve: " tsym)))))
+
 (defn resolve-protocol-symbol
   ([env psym] (resolve-protocol-symbol env psym false))
   ([env psym warn]
@@ -573,12 +579,13 @@
                         ~(emit-arity-name 'cljs.core/IFn '-invoke (core/dec n))
                         ~@(rest args)))))))
 
-(defn emit-invoke-method [arity impl]
+(defn emit-invoke-method [arity this-meta impl]
   (let [args (map #(core/symbol (core/str "arg-" (core/inc %)))
                   (core/range arity))]
-    `(fn ~(vec args)
-       (~'js* "var self__ = this;")
-       (. ~impl ~'call (~'js* "this") (~'js* "this") ~@args))))
+    (let [this-sym (with-meta 'self__ this-meta)]
+      `(fn ~(vec args)
+         (this-as ~this-sym
+                  (. ~impl ~'call ~this-sym ~this-sym ~@args))))))
 
 (defn emit-ifn-impl [osym methods]
   (assert (= 1 (count methods)) "Only one method on IFn")
@@ -591,13 +598,14 @@
             ~(core/dec (core/apply core/max (keys m))))
      `(set! (. ~osym ~'-cljs$lang$applyTo)
             (~'fn [args#]
-              (apply-to (~'js* "this") (count args#) args#)))
+              (this-as this#
+                       (apply-to this# (count args#) args#))))
      (for [[arity impl] m]
        `(set! 
          (. ~osym
             ~(to-property 
               (emit-arity-name 'cljs.core/IFn '-invoke (core/dec arity)))) 
-         ~(emit-invoke-method (core/dec arity) impl))))))
+         ~(emit-invoke-method (core/dec arity) (meta osym) impl))))))
 
 (defmacro specify*
   "Let an instance implement protocols, with a syntax loosely based on extend. Implementing closures are passed along with explicit arities:
@@ -706,7 +714,10 @@
 (defmacro extend-type [tsym & impls]
   (if-let [t (base-type tsym)]
     (emit-extend-base-type &env t impls)
-    `(specify ~(with-meta `(.-prototype ~tsym) (meta tsym)) ~@impls)))
+    `(specify ~(with-meta `(.-prototype ~tsym) 
+                 (assoc (meta tsym)
+                   :tag (resolve-type-symbol &env tsym))) 
+              ~@impls)))
 
 (defn- prepare-protocol-masks [env t impls]
   (let [resolve #(let [ret (:name (cljs.analyzer/resolve-var (dissoc env :locals) %))]
