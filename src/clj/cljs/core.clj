@@ -565,10 +565,12 @@
            (vary-meta (:name existing) merge (meta psym))
            psym)))))
 
-(defn emit-arity-name [psym method arity]
+(defn to-arity-name [psym method arity]
   (symbol (core/str (protocol-prefix psym) method "$arity$" arity)))
 
 (defn emit-call-method [arities]
+  ;; A .call method bridge for javascript
+  ;; This could also be defined just once with all supported arities
   (cons 'fn
         (for [[n _] arities
               :let [[this :as args] (map #(core/symbol (core/str "arg-" (core/inc %)))
@@ -576,10 +578,13 @@
           `(~(vec args)
             (this-as this#
                      (. this#
-                        ~(emit-arity-name 'cljs.core/IFn '-invoke (core/dec n))
+                        ~(to-arity-name 'cljs.core/IFn '-invoke (core/dec n))
                         ~@(rest args)))))))
 
 (defn emit-invoke-method [arity this-meta impl]
+  ;; A wrapper for an -invoke method: instance.-invoke.call(self, args) -> impl.-invoke.call(self, self, args)
+  ;; this might be applicable to all methods, if and when the cljs ABI changes to invoke all methods
+  ;; in the style of IFn/-invoke
   (let [args (map #(core/symbol (core/str "arg-" (core/inc %)))
                   (core/range arity))]
     (let [this-sym (with-meta 'self__ this-meta)]
@@ -588,6 +593,7 @@
                   (. ~impl ~'call ~this-sym ~this-sym ~@args))))))
 
 (defn emit-ifn-impl [osym methods]
+  ;; generate protocol fields on an IFn
   (assert (= 1 (count methods)) "Only one method on IFn")
   (let [m (or (core/get methods '-invoke)
               (throw (Exception. "No -invoke method found")))]
@@ -603,9 +609,101 @@
      (for [[arity impl] m]
        `(set! 
          (. ~osym
-            ~(to-property 
-              (emit-arity-name 'cljs.core/IFn '-invoke (core/dec arity)))) 
+            ~(to-property
+              ;; dec accounts for the altered IFn ABI
+              (to-arity-name 'cljs.core/IFn '-invoke (core/dec arity)))) 
          ~(emit-invoke-method (core/dec arity) (meta osym) impl))))))
+
+(defn to-set-pred [val]
+  (if (core/instance? Boolean val)
+    (constantly val)
+    (set val)))
+
+(defn emit-peel-fn [osym psym msym [_fn & arities]]
+  {:pre [(= _fn 'fn*)]}
+  (if (vector? (first arities))
+    (recur osym psym msym ['fn* (list arities)])
+    (for [[params & body] arities]
+      `(set!
+        (. ~osym ~(to-property (to-arity-name psym msym (count params))))
+        (fn* ~params ~@body)))))
+
+(defn emit-peel-runtime [osym psym msym arities form]
+  (if-not (core/symbol? form)
+    (let [fsym (gensym "impl-")]
+      [`(let [~fsym ~form]
+          ~@(emit-peel-runtime osym psym msym arities fsym))])
+    (let [fsym form]
+      (for [arity arities]
+        `(set!
+          (. ~osym ~(to-property (to-arity-name psym msym arity)))
+          (let [a# (. ~fsym
+                      ~(to-property
+                        (to-arity-name 'cljs.core/IFn '-invoke arity)))]
+            (if (exists? a#)
+              a#
+              ;; TODO log a performance warning here, when
+              ;; debug flag is enabled
+              ~fsym)))))))
+
+(comment
+
+  (let* [specify-target-3310 (js-obj)] 
+        (cljs.core/specify! specify-target-3310 INamed {:-namespace (constantly "The name space!")}))
+
+  (core/require '[clojure.pprint :refer [pprint]])
+  (defn perror [& [a args]]
+    (.print System/err (core/str a))
+    (core/doseq [a args]
+      (.print System/err " ")
+      (.print System/err (core/str a)))
+    (.println System/err)))
+
+(defn mexpand [env form]
+  (let [form' (cljs.analyzer/macroexpand-1 env form)]
+    (if (not= form form')
+      (recur env form')
+      form)))
+
+(defn emit-specify [env osym psym methods]
+  (let [pinfo (cljs.analyzer/analyze-symbol env psym)]
+    (if (= psym 'cljs.core/IFn)
+      (assert false '(not-converted (emit-ifn-impl osym methods)))
+      (apply concat 
+             (for [[method form] methods
+                   :let [form (mexpand env form)
+                         msym (core/symbol (name method))]]
+               (if (and (seq? form)
+                        (= 'fn* (first form)))
+                 (emit-peel-fn osym psym msym form)
+                 (if-let [arities (get-in pinfo [:info :method-arities msym])]
+                   (emit-peel-runtime osym psym msym arities form)
+                   (throw (ex-info (core/str "No protocol method " psym " " msym " found")
+                                   {:error :type-error
+                                    :protocol psym
+                                    :method method
+                                    :pinfo pinfo})))))))))
+
+(defmacro specify!
+  [target & proto+mmaps]
+  {:pre [(even? (count proto+mmaps))
+         (every? #(or (core/symbol? %) (keyword? %))
+                 (take-nth 2 proto+mmaps))]}
+  (if-not (core/symbol? target)
+    (let [osym (with-meta (gensym "specify-target-") (meta target))]
+      ;; recur wit a symbol target
+      `(let [~osym ~target]
+         (specify! ~osym ~@proto+mmaps)))
+    (let [osym target
+          field (fn [field] `(. ~osym ~(to-property field)))
+          skip-flag? (-> osym meta :skip-protocol-flag to-set-pred)]
+      `(do ~@(apply concat
+                    (for [[proto methods] (partition 2 proto+mmaps)
+                          :let [psym (resolve-protocol-symbol &env proto true)]]
+                      (cons (when-not (skip-flag? psym)
+                              `(set! ~(field (protocol-prefix psym)) true))
+                            (emit-specify &env osym psym methods))))
+           ~osym))))
 
 (defmacro specify*
   "Let an instance implement protocols, with a syntax loosely based on extend. Implementing closures are passed along with explicit arities:
@@ -641,7 +739,7 @@
                          (emit-ifn-impl osym methods)
                          (for [[method arities] methods
                                [arity impl] arities]
-                           `(set! ~(oprefix (emit-arity-name psym method arity)) ~impl))))))
+                           `(set! ~(oprefix (to-arity-name psym method arity)) ~impl))))))
            ~osym))))
 
 
@@ -898,11 +996,16 @@
 
 (defmacro defprotocol [psym & doc+methods]
   (let [p (:name (cljs.analyzer/resolve-var (dissoc &env :locals) psym))
-        psym (vary-meta psym assoc :protocol-symbol true)
+        methods (if (core/string? (first doc+methods)) (next doc+methods) doc+methods)
+        psym (vary-meta psym assoc
+                        :protocol-symbol true
+                        :method-arities (into {} (for [[fname & sigs] methods]
+                                                   [fname 
+                                                    (mapv count
+                                                          (take-while vector? sigs))])))
         ns-name (-> &env :ns :name)
         fqn (fn [n] (symbol (core/str ns-name "." n)))
         prefix (protocol-prefix p)
-        methods (if (core/string? (first doc+methods)) (next doc+methods) doc+methods)
         expand-sig (fn [fname slot sig]
                      `(~sig
                        (if (and ~(first sig) (. ~(first sig) ~(symbol (core/str "-" slot)))) ;; Property access needed here.

@@ -1387,6 +1387,13 @@
         (assert (= (count s1) 2))
         (assert (= (count s2) 2)))))
 
+  ;; We really need a test macro to test for expected exceptions during macro expansion
+  (let [x (specify! (js-obj)
+            INamed {:-namespace (constantly "The name space!")
+                    :-name (fn [_] "Hello there!")})]
+    (assert (= "The name space!" (namespace x)))
+    (assert (= "Hello there!" (name x))))
+
   ;; specify
   (defprotocol ^:deprecated Should_Warn_Deprecated)
   (defprotocol ^:deprecated Should_Not_Warn!!)
