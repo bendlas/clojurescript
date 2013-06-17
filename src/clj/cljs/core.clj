@@ -572,12 +572,12 @@
   ;; A .call method bridge for javascript
   ;; This could also be defined just once with all supported arities
   (cons 'fn
-        (for [args args-seq]
+        (for [[this & params :as args] args-seq]
           `(~(vec args)
-            (this-as this#
-                     (. this#
-                        ~(to-arity-name 'cljs.core/IFn '-invoke (count args))
-                        ~@(rest args)))))))
+            (this-as ~this
+                     (. ~this
+                        ~(to-arity-name 'cljs.core/IFn '-invoke (count params))
+                        ~@params))))))
 
 ;; Normalize (fn [a b c] x y z) and (foo ([a b c] x y z)) to (([a b c] x y z) ...)
 (defn fn-arities [[_ & fntail]]
@@ -585,21 +585,17 @@
     (list fntail)
     fntail))
 
-(defn emit-add-ifn-impl [osym methods]
+(defn emit-add-ifn-impl [osym args-seq]
   ;; generate protocol fields on an IFn
-  (assert (= 1 (count methods)) "Only one method on IFn")
-  (let [m (or (core/get methods '-invoke)
-              (throw (Exception. "No -invoke method found")))
-        args-seq (map first (fn-arities m))]
-    (list
-     `(set! (. ~osym ~'-call)
-            ~(emit-call-method args-seq))
-     `(set! (. ~osym ~'-cljs$lang$maxFixedArity)
-            ~(core/dec (core/apply core/max (map count args-seq))))
-     `(set! (. ~osym ~'-cljs$lang$applyTo)
-            (~'fn [args#]
-              (this-as this#
-                       (apply-to this# (count args#) args#)))))))
+  (list
+   `(set! (. ~osym ~'-call)
+          ~(emit-call-method args-seq))
+   `(set! (. ~osym ~'-cljs$lang$maxFixedArity)
+          ~(core/dec (core/apply core/max (map count args-seq))))
+   `(set! (. ~osym ~'-cljs$lang$applyTo)
+          (~'fn [args#]
+            (this-as this#
+                     (apply-to this# (count args#) args#))))))
 
 (defn to-set-pred [val]
   (if (core/instance? Boolean val)
@@ -609,12 +605,13 @@
 (defn emit-peel-runtime [osym psym msym arities form]
   (if-not (core/symbol? form)
     (let [fsym (gensym "impl-")]
+      ;; TODO generate self__ here
       [`(let [~fsym ~form]
           ~@(emit-peel-runtime osym psym msym arities fsym))])
     (let [fsym form]
-      (for [arity arities
+      (for [arity (map core/dec arities)
             :let [args (map #(core/symbol (core/str "arg-" (core/inc %)))
-                            (core/range (core/dec arity)))]]
+                            (core/range arity))]]
         `(set!
           (. ~osym ~(to-property (to-arity-name psym msym arity)))
           (fn ~(vec args)
@@ -623,24 +620,19 @@
 (defn emit-peel-fn [osym psym msym [_fn & arities :as f]]
   {:pre [(= _fn 'fn*)]}
   (cond
-   ;; when function is named, it might contain recursive calls
-   ;; just defer to peel-runtime, which keeps the object intact
-   (core/symbol? (first arities)) (emit-peel-runtime osym psym msym
-                                                     (map (cons count first)
-                                                          (fn-arities arities))
-                                                     f)
    (vector? (first arities)) (recur osym psym msym (with-meta ['fn* (list arities)]
                                                      (meta f)))
-   :else (for [[[fp & args :as p] & body] arities]
-           (let [this (with-meta fp (merge (select-keys (meta osym) [:tag]) (meta fp)))]
-             `(set!
-               (. ~osym ~(to-property (to-arity-name psym msym (count p))))
-               (fn* ~(vec args)
-                    ;; setup nested function as a recur target
-                    (.call ~(with-meta `(fn* ~(vec (cons this args))
-                                             ~@body)
-                              (meta f))
-                           (~'js* "this") (~'js* "this") ~@args)))))))
+   :else (doall (for [[[fp & args :as p] & body] arities]
+             (let [this (with-meta fp (merge (select-keys (meta osym) [:tag]) (meta fp)))]
+               (assert (not (some #{'&} args)) f)
+               `(set!
+                 (. ~osym ~(to-property (to-arity-name psym msym (count args))))
+                 (fn* ~(vec args)
+                      ;; setup nested function as a recur target
+                      (.call ~(with-meta `(fn* ~(vec (cons this args))
+                                               ~@body)
+                                (meta f))
+                             (~'js* "this") (~'js* "this") ~@args))))))))
 
 (defn mexpand [env form]
   (let [form' (with-meta (cljs.analyzer/macroexpand-1 env form)
@@ -649,49 +641,66 @@
       (recur env form')
       form)))
 
-(defn emit-ext-fn-method [env fsym]
-  (mexpand env
-           (cons 'fn
-                 ;; reflects max ifn params
-                 (for [arity (core/range 21)
-                       :let [args (map #(core/symbol (core/str "arg-" (core/inc %)))
-                                       (core/range arity))]]
-                   `(~(vec args)
-                     ;; this should generate a direct dispatch
-                     (~fsym ~@args))))))
-
 (defn emit-specify-method [env osym pinfo psym msym form]
-  (if (and (seq? form)
-           (= 'fn* (first form)))
-    (emit-peel-fn osym psym msym form)
-    (if-let [arities (get-in pinfo [:info :method-arities msym])]
-      (emit-peel-runtime osym psym msym arities form)
-      (throw (ex-info (core/str "No protocol method " psym " " msym " found")
-                      {:error :type-error
-                       :protocol psym
-                       :method msym})))))
+  (let [arities (and (seq? form)
+                     (= 'fn* (first form))
+                     (map first (fn-arities 
+                                 (if (core/symbol? (second form))
+                                   (next form)
+                                   form))))]
+    (concat
+     (when (= 'cljs.core/IFn psym)
+       (if-let [args-seq arities]
+         ;; shave off this arg for call method
+         (emit-add-ifn-impl osym args-seq)
+         (emit-add-ifn-impl osym (map #(gensym "arg-" %) (range 21))))     )
+     (if (and (seq? form)
+              (= 'fn* (first form))
+              ;; variadic fns
+              (not (some #{'&} (apply concat arities)))
+              ;; when function is named, it might contain recursive calls
+              ;; just defer to peel-runtime, which keeps the object intact
+              (not (core/symbol? (second form))))
+       (emit-peel-fn osym psym msym form)
+       (if-let [arities (get-in pinfo [:info :method-arities msym]
+                                (and arities (map count arities)))]
+         (emit-peel-runtime osym psym msym arities form)
+         (throw (ex-info (core/str "No protocol method " psym " " msym " found")
+                         {:error :type-error
+                          :protocol psym
+                          :method msym})))))))
 
-(defn emit-invoke-method [env osym form]
-  (emit-peel-fn osym 'cljs.core/IFn '-invoke
-                (if (and (seq? form)
-                         (= 'fn* (first form)))
-                  form
-                  (do
-                    (cljs.analyzer/warning env (core/str "WARNING: Arities of " form 
-                                                         " not known, generating all arities for IFn"))
-                    ;; this range should reflect max support ifn args
-                    (emit-ext-fn-method env )))))
+;; Methods without a protocol, e.g. toString
+(defn emit-object-method [env osym msym form]
+  `(set! 
+    (. ~osym ~(to-property msym))
+    ~(if (and (seq? form)
+              (= 'fn* (first form))
+              (not (core/symbol? (second form))))
+       (let [adapt-params (fn [[[this-sym & args] & body]]
+                            (list (vec args) (list* 'this-as (with-meta this-sym 
+                                                               ;; user can override tag
+                                                               (merge {:tag (:tag osym)}
+                                                                      (meta this-sym)))
+                                                    body)))]
+         (with-meta `(fn ~@(map adapt-params (fn-arities form)))
+           (meta form)))
+       (do
+         (cljs.analyzer/warning env (core/str "PERFORMANCE: Don't know arities of Object method: "
+                                              msym))
+         `(let [form# ~form] (fn [& args#] (apply form# args#)))))))
 
 (defn emit-specify [env osym psym methods]
   {:pre [(every? #(or (core/symbol? %) (keyword? %))
                  (keys methods))]}
-  (let [pinfo (cljs.analyzer/analyze-symbol env psym)]
-    (apply concat (when (= 'cljs.core/IFn psym)
-                    (emit-add-ifn-impl osym methods))
-           (for [[method form] methods
-                 :let [form (mexpand env form)
-                       msym (symbol (name method))]]
-             (emit-specify-method env osym pinfo psym msym form)))))
+  (apply concat
+         (for [[method form] methods
+               :let [form (mexpand env form)
+                     msym (symbol (name method))]]
+           (if (= 'Object psym)
+             [(emit-object-method env osym msym form)]
+             (let [pinfo (cljs.analyzer/analyze-symbol env psym)]
+               (emit-specify-method env osym pinfo psym msym form))))))
 
 (defmacro specify!
   [target & proto+mmaps]
@@ -714,15 +723,84 @@
                             (emit-specify &env osym psym methods))))
            ~osym))))
 
-;; Methods without a protocol, e.g. toString
-(defn emit-object-methods [tag osym sigs]
-  (let [adapt-params (fn [[[this-sym & args] & body]]
-                       (list (vec args) (list* 'this-as (vary-meta this-sym assoc :tag tag)
-                                               body)))]
-    (mapcat (fn [[f & meths :as form]]
-              `(set! (. ~osym ~(to-property f))
-                     ~(with-meta `(fn ~@(map adapt-params meths)) (meta form))))
-            sigs)))
+(comment
+  (let* [specify-target-6670 (.-prototype t6603)])
+
+  (set! (. specify-target-6670 -cljs$core$IWithMeta$)
+        true)
+  (set! (. specify-target-6670 -cljs$core$IWithMeta$-with-meta$arity$1)
+        (fn* [meta6604] (.call (fn* [_6605 meta6604] (new t6603 meta6604)) (js* "this") (js* "this") meta6604)))
+  (set! (. specify-target-6670 -cljs$core$IMeta$)
+        true)
+  (set! (. specify-target-6670 -cljs$core$IMeta$-meta$arity$0)
+        (fn* [] (.call (fn* [_6605] meta6604) (js* "this") (js* "this"))))
+  (set! (. specify-target-6670 -$Fn$)
+        true)
+  (set! (. specify-target-6670 -cljs$core$IFn$)
+        true)
+  (set! (. specify-target-6670 -call)
+        (fn ([_ & args] (cljs.core/this-as this__5970__auto__ (. this__5970__auto__ cljs$core$IFn$-invoke$arity$2 & args)))))
+  (set! (. specify-target-6670 -cljs$lang$maxFixedArity)
+        2)
+  (set! (. specify-target-6670 -cljs$lang$applyTo)
+        (fn [args__5989__auto__] (cljs.core/this-as this__5990__auto__ (cljs.core/apply-to this__5990__auto__ (clojure.core/count args__5989__auto__) args__5989__auto__))))
+  (set! (. specify-target-6670 -cljs$core$IFn$-invoke$arity$2)
+        (fn* [& args] (.call (fn* [_ & args] (apply o args)) (js* "this") (js* "this") & args))) specify-target-6670)
+
+(comment 
+  (cljs.core/deftype t6492 [meta6493]
+    cljs.core/IWithMeta (-with-meta [_6494 meta6493] (new t6492 meta6493))
+    cljs.core/IMeta (-meta [_6494] meta6493)
+    Fn IFn (-invoke [_ & args] (apply o args))))
+
+(comment 
+  (cljs.core/extend-type t6492
+    cljs.core/IWithMeta (-with-meta ([_6494 meta6493] (new t6492 meta6493)))
+    cljs.core/IMeta (-meta ([_6494] meta6493))
+    Fn IFn (-invoke ([_ & args] (apply o args)))))
+
+(comment
+  (cljs.core/specify! 
+   (.-prototype t6492) 
+   cljs.core/IWithMeta {-with-meta (fn ([_6494 meta6493] (new t6492 meta6493)))}
+   cljs.core/IMeta {-meta (fn ([_6494] meta6493))}
+   Fn {} IFn {-invoke (fn ([_ & args] (apply o args)))}))
+
+(comment
+  (set! (. specify-target-6513 -cljs$core$IWithMeta$) true)
+  (set! (. specify-target-6513 -cljs$core$IWithMeta$-with-meta$arity$1)
+        (fn* [meta6493] (.call (fn* [_6494 meta6493] (new t6492 meta6493)) (js* "this") (js* "this") meta6493)))
+  (set! (. specify-target-6513 -cljs$core$IMeta$)
+        true)
+  (set! (. specify-target-6513 -cljs$core$IMeta$-meta$arity$0)
+        (fn* [] (.call (fn* [_6494] meta6493) (js* "this") (js* "this"))))
+  (set! (. specify-target-6513 -$Fn$)
+        true)
+  (set! (. specify-target-6513 -$IFn$)
+        true)
+  (set! (. specify-target-6513 -$IFn$-invoke$arity$2)
+        (fn* [& args] (.call (fn* [_ & args] (apply o args)) (js* "this") (js* "this") & args)))
+  specify-target-6513)
+
+(comment
+  (set! (. specify-target-6570 -cljs$core$IFn$)
+        true)
+ (set! (. specify-target-6570 -call)
+       (fn 
+         ([_] (cljs.core/this-as this__5970__auto__ (. this__5970__auto__ cljs$core$IFn$-invoke$arity$0)))
+         ([_ a] (cljs.core/this-as this__5970__auto__ (. this__5970__auto__ cljs$core$IFn$-invoke$arity$1 a)))
+         ([_ a b] (cljs.core/this-as this__5970__auto__ (. this__5970__auto__ cljs$core$IFn$-invoke$arity$2 a b)))))
+ (set! (. specify-target-6570 -cljs$lang$maxFixedArity)
+       2)
+ (set! (. specify-target-6570 -cljs$lang$applyTo)
+       (fn [args__5989__auto__] (cljs.core/this-as this__5990__auto__ (cljs.core/apply-to this__5990__auto__ (clojure.core/count args__5989__auto__) args__5989__auto__))))
+ (set! (. specify-target-6570 -cljs$core$IFn$-invoke$arity$0)
+       (fn* [] (.call (fn* [_] :a) (js* "this") (js* "this"))))
+ (set! (. specify-target-6570 -cljs$core$IFn$-invoke$arity$1)
+       (fn* [a] (.call (fn* [_ a] :b) (js* "this") (js* "this") a)))
+ (set! (. specify-target-6570 -cljs$core$IFn$-invoke$arity$2)
+       (fn* [a b] (.call (fn* [_ a b] :c) (js* "this") (js* "this") a b)))
+ specify-target-6570)
 
 (defn method->name-fn [tag form]
   (let [arities (fn-arities form)]
@@ -756,23 +834,17 @@
   (let [tag (resolve-type-symbol env tsym)
         target (with-meta `(.-prototype ~tsym) 
                  (assoc (meta tsym) :tag tag))]
-    (loop [prelude []
-           spec-args []
+    (loop [spec-args []
            s impls]
       (if-let [[proto & impls] (seq s)]
         (let [sigs (take-while seq? impls)
               rest-impls (drop-while seq? impls)]
           (assert (core/symbol? proto) (core/str "Not a protocol " proto))
-          (if (= 'Object proto)
-            (recur (concat prelude (emit-object-methods tag target sigs))
-                   spec-args
-                   rest-impls)
-            (recur prelude 
-                   (into spec-args (list proto 
-                                         (into {} (map (partial method->name-fn tag)
-                                                       sigs))))
-                   rest-impls)))
-        `(do ~@prelude (specify! ~target ~@spec-args))))))
+          (recur (into spec-args (list proto 
+                                       (into {} (map (partial method->name-fn tag)
+                                                     sigs))))
+                 rest-impls))
+        `(specify! ~target ~@spec-args)))))
 
 (defmacro extend-type [tsym & impls]
   (if-let [t (base-type tsym)]
@@ -985,7 +1057,7 @@
                        fname (vary-meta fname assoc :protocol p)]
                    `(defn ~fname ~@(map (fn [sig]
                                           (expand-sig fname
-                                                      (symbol (core/str slot "$arity$" (count sig)))
+                                                      (symbol (core/str slot "$arity$" (core/dec (count sig))))
                                                       sig))
                                         sigs))))]
     `(do
