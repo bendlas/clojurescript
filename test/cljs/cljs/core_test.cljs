@@ -1397,15 +1397,15 @@
   ;; specify
   (defprotocol ^:deprecated Should_Warn_Deprecated)
   (defprotocol ^:deprecated Should_Not_Warn!!)
-  (let [flag   (specify (js-obj)
-                 Should_Warn_No_Protocol
-                 Should_Warn_Deprecated
-                 ^:deprecation-nowarn Should_Not_Warn!!)
-        noflag (specify ^:skip-protocol-flag (js-obj)
-                        ISeq (-first [_] "works anyway"))
-        someflag (specify ^{:skip-protocol-flag [cljs.core/ISeq]} (js-obj)
-                        INamed (-name [_] "someflag")
-                        ISeq (-first [_] "works anyway"))]
+  (let [flag   (specify! (js-obj)
+                 Should_Warn_No_Protocol {}
+                 Should_Warn_Deprecated  {}
+                 ^:deprecation-nowarn Should_Not_Warn!! {})
+        noflag (specify! ^:skip-protocol-flag (js-obj)
+                 ISeq {:-first (fn [_] "works anyway")})
+        someflag (specify! ^{:skip-protocol-flag [cljs.core/ISeq]} (js-obj)
+                   INamed {:-name (fn [_] "someflag")}
+                   ISeq   {:-first (fn [_] "works anyway")})]
 
     (assert (satisfies? Should_Warn_Deprecated flag))
 
